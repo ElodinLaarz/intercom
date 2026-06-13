@@ -8,7 +8,7 @@ Update at every milestone gate and any on-device session.
 | Subsystem | Last validated on device | Device(s) | What passed |
 |---|---|---|---|
 | App shell (stub) | 2026-06-12 | Pixel 10 Pro XL (USB) | adb install + launch + `INTERCOM: STARTED version=0.0.1` in logcat |
-| CI (Forgejo) | — | — | runner capability unprobed (JDK/SDK/NDK) |
+| CI (Forgejo) | 2026-06-12 | `flutter` runner (Ubuntu 24.04 container) | checkout-by-sha + `assembleDebug` green in 1m23s (run 2); JDK 21 + SDK present on image. NDK/cmake still unprobed (matters from M1) |
 | Smoke harness | — | — | not built |
 | Radio (BLE link) | — | — | M1, not started |
 | Voice pipeline | — | — | M1, not started |

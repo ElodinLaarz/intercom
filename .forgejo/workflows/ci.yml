@@ -18,7 +18,7 @@ jobs:
           git checkout FETCH_HEAD
           git log -1 --format='checked out: %H %s'
 
-      - name: Runner capability probe (M0 — expected to fail until runner has JDK17 + Android SDK)
+      - name: Runner environment (JDK 21 + SDK confirmed present 2026-06-12; NDK unprobed)
         run: |
           java -version 2>&1 || echo "NO JAVA on runner"
           echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
