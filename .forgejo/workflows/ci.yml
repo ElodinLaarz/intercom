@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: flutter
+    steps:
+      - name: Checkout PR head (manual — JS actions unavailable on this runner)
+        run: |
+          set -e
+          SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          echo "Building sha: $SHA"
+          git init .
+          git fetch --depth 1 http://forgejo:3000/laarz/intercom.git "$SHA"
+          git checkout FETCH_HEAD
+          git log -1 --format='checked out: %H %s'
+
+      - name: Runner capability probe (M0 — expected to fail until runner has JDK17 + Android SDK)
+        run: |
+          java -version 2>&1 || echo "NO JAVA on runner"
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon assembleDebug
