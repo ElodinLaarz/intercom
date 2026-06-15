@@ -104,7 +104,10 @@ class GuestRadio(
 
     private val scanCallback =
         object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult?) {
+            override fun onScanResult(
+                callbackType: Int,
+                result: ScanResult?,
+            ) {
                 val device = result?.device ?: return
                 if (!running) return
                 running = false // got our host — stop scanning and connect
@@ -126,7 +129,11 @@ class GuestRadio(
 
     private val gattCallback =
         object : BluetoothGattCallback() {
-            override fun onConnectionStateChange(g: BluetoothGatt?, status: Int, newState: Int) {
+            override fun onConnectionStateChange(
+                g: BluetoothGatt?,
+                status: Int,
+                newState: Int,
+            ) {
                 Log.i(TAG, "RADIO gatt conn status=$status newState=$newState")
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     onStatus("Connected — negotiating link…")
@@ -139,13 +146,20 @@ class GuestRadio(
                 }
             }
 
-            override fun onMtuChanged(g: BluetoothGatt?, mtu: Int, status: Int) {
+            override fun onMtuChanged(
+                g: BluetoothGatt?,
+                mtu: Int,
+                status: Int,
+            ) {
                 Log.i(TAG, "RADIO gatt mtu=$mtu status=$status")
                 onStatus("MTU $mtu — discovering services…")
                 g?.discoverServices()
             }
 
-            override fun onServicesDiscovered(g: BluetoothGatt?, status: Int) {
+            override fun onServicesDiscovered(
+                g: BluetoothGatt?,
+                status: Int,
+            ) {
                 val characteristic = g?.getService(serviceUuid)?.getCharacteristic(psmCharUuid)
                 if (characteristic == null) {
                     Log.w(TAG, "RADIO gatt PSM characteristic not found status=$status")
