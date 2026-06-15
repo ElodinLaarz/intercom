@@ -1,0 +1,6 @@
+# Partial config — merged onto detekt's defaults via --build-upon-default-config.
+# Keep this minimal; only override what genuinely fights our stack.
+naming:
+  FunctionNaming:
+    # @Composable functions are PascalCase by convention.
+    ignoreAnnotated: ['Composable']

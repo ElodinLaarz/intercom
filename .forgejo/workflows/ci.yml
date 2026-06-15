@@ -77,6 +77,19 @@ jobs:
           [ "$BAD" -eq 0 ] || exit 1
           echo "constants single-source OK"
 
+      - name: Lint (ktlint + detekt)
+        run: |
+          set -e
+          KT=/tmp/ktlint-1.5.0.jar
+          DT=/tmp/detekt-1.23.7-all.jar
+          curl -sSL -o "$KT" https://github.com/pinterest/ktlint/releases/download/1.5.0/ktlint
+          curl -sSL -o "$DT" https://github.com/detekt/detekt/releases/download/v1.23.7/detekt-cli-1.23.7-all.jar
+          echo "== ktlint =="
+          java -jar "$KT" "app/src/**/*.kt" "!app/src/main/kotlin/com/elodin/intercom/proto/Proto.kt"
+          echo "== detekt =="
+          java -jar "$DT" --input app/src --excludes "**/proto/Proto.kt" \
+            --build-upon-default-config --config config/detekt.yml
+
       - name: Kotlin unit tests
         run: ./gradlew --no-daemon testDebugUnitTest
 

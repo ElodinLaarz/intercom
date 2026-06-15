@@ -33,16 +33,10 @@ import com.elodin.intercom.proto.Proto
  * install, launch, and grep for. See V2_PLAN.md §5 (M0) and STATUS.md.
  */
 class MainActivity : ComponentActivity() {
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.i(TAG, "STARTED version=${BuildConfig.VERSION_NAME}")
-        val native = try {
-            "0x%X".format(NativeCore.selfTest())
-        } catch (t: Throwable) {
-            "ERR ${t.message}"
-        }
-        Log.i(TAG, "NATIVE selfTest=$native")
+        Log.i(TAG, "NATIVE selfTest=${nativeSelfTest()}")
         Log.i(TAG, "PROTO v=${Proto.PROTOCOL_VERSION} svc=${Proto.SERVICE_UUID}")
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -56,13 +50,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // selfTest can throw UnsatisfiedLinkError if the .so failed to load — log it
+    // rather than crash, so the smoke harness still sees the NATIVE line.
+    @Suppress("TooGenericExceptionCaught")
+    private fun nativeSelfTest(): String =
+        try {
+            "0x%X".format(NativeCore.selfTest())
+        } catch (t: Throwable) {
+            "ERR ${t.message}"
+        }
+
     companion object {
         const val TAG = "INTERCOM"
     }
 }
 
 @Composable
-private fun HomeScreen(onHost: () -> Unit, onJoin: () -> Unit) {
+private fun HomeScreen(
+    onHost: () -> Unit,
+    onJoin: () -> Unit,
+) {
     var lastTap by remember { mutableStateOf<String?>(null) }
     Column(
         modifier = Modifier.fillMaxSize().padding(32.dp),
@@ -77,9 +84,15 @@ private fun HomeScreen(onHost: () -> Unit, onJoin: () -> Unit) {
         )
         Spacer(Modifier.height(48.dp))
         Row {
-            Button(onClick = { lastTap = "Host"; onHost() }) { Text("Host") }
+            Button(onClick = {
+                lastTap = "Host"
+                onHost()
+            }) { Text("Host") }
             Spacer(Modifier.width(24.dp))
-            OutlinedButton(onClick = { lastTap = "Join"; onJoin() }) { Text("Join") }
+            OutlinedButton(onClick = {
+                lastTap = "Join"
+                onJoin()
+            }) { Text("Join") }
         }
         Spacer(Modifier.height(24.dp))
         Text(
