@@ -3,6 +3,7 @@
 
 #include <cstdint>
 
+#include "constants.h"
 #include "ring_buffer.h"
 #include "seq_filter.h"
 
@@ -26,8 +27,8 @@ Java_com_elodin_intercom_NativeCore_selfTest(JNIEnv*, jobject) {
 
   bool ok = popped && rb.overwriteCount() == 2 && accepted && !duplicate &&
             !wrong_epoch;
-  LOGI("selfTest ok=%d overwrites=%llu firstPop=%d", ok ? 1 : 0,
+  LOGI("selfTest ok=%d overwrites=%llu firstPop=%d protoV=%d", ok ? 1 : 0,
        static_cast<unsigned long long>(rb.overwriteCount()),
-       static_cast<int>(first));
+       static_cast<int>(first), intercore::proto::kProtocolVersion);
   return ok ? 0xC0DE : 0;
 }

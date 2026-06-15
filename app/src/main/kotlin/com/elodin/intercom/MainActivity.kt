@@ -26,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.elodin.intercom.proto.Proto
 
 /**
  * M0 stub. No radio, no audio — exists so the smoke harness has something to
@@ -42,6 +43,7 @@ class MainActivity : ComponentActivity() {
             "ERR ${t.message}"
         }
         Log.i(TAG, "NATIVE selfTest=$native")
+        Log.i(TAG, "PROTO v=${Proto.PROTOCOL_VERSION} svc=${Proto.SERVICE_UUID}")
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(modifier = Modifier.fillMaxSize()) {

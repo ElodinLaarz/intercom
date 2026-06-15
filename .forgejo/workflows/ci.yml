@@ -60,5 +60,25 @@ jobs:
           "$CMAKE" --build native/build
           (cd native/build && "$CTEST" --output-on-failure)
 
+      - name: Constants single-source check
+        run: |
+          set -e
+          bash tools/gen-proto.sh
+          PK=app/src/main/kotlin/com/elodin/intercom/proto/Proto.kt
+          if ! git diff --quiet -- "$PK"; then
+            echo "FATAL: Proto.kt is stale — run tools/gen-proto.sh and commit it"
+            git --no-pager diff -- "$PK"; exit 1
+          fi
+          BAD=0
+          for lit in 0xFFFF b1f0c0de-1a2b-4c3d-8e5f-000000000001 b1f0c0de-1a2b-4c3d-8e5f-000000000002; do
+            HITS=$(grep -RniF --include='*.kt' --exclude='Proto.kt' "$lit" app/src/main || true)
+            if [ -n "$HITS" ]; then echo "FATAL: wire literal '$lit' re-declared outside Proto.kt:"; echo "$HITS"; BAD=1; fi
+          done
+          [ "$BAD" -eq 0 ] || exit 1
+          echo "constants single-source OK"
+
+      - name: Kotlin unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
       - name: Build debug APK (NDK-backed)
         run: ./gradlew --no-daemon assembleDebug

@@ -11,7 +11,8 @@ add_library(intercore SHARED intercore_jni.cpp)
 
 # Shared, codec-agnostic core (host-tested under /native).
 target_include_directories(intercore PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../native/core)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../native/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../proto)
 
 find_library(log-lib log)
 target_link_libraries(intercore ${log-lib})
