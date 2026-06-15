@@ -12,6 +12,7 @@ only lessons.
 | [V2_PLAN.md](V2_PLAN.md) | The governing plan: architecture, milestones, hardware gates, platform landmine list. Read before working here. |
 | [POSTMORTEM.md](POSTMORTEM.md) | Why v1 was retired and what this repo must not repeat. |
 | [STATUS.md](STATUS.md) | Per-subsystem, last-validated-on-device dates. The only status that counts. |
+| [M1_PLAN.md](M1_PLAN.md) | Current milestone (M1 — tracer bullet) design + ordered todo. Start here when picking up M1. |
 
 ## Build
 
