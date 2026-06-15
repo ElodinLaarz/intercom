@@ -15,6 +15,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import com.elodin.intercom.proto.Proto
 import java.nio.ByteBuffer
@@ -113,6 +114,12 @@ internal class GuestRadio(
             stop(reportStopped = false)
             return false
         }
+        val cooldownMs = scanStartBudget.delayUntilAvailableMs()
+        if (cooldownMs > 0) {
+            Log.w(TAG, "RADIO scan cooldown ${cooldownMs}ms before retry")
+            scheduleScanCooldown(cooldownMs)
+            return true
+        }
 
         scanner = ble
         // Filter on the host's minimal MSD adv ([0x01,0x01]) — not the 128-bit
@@ -149,6 +156,7 @@ internal class GuestRadio(
     ): Boolean =
         try {
             ble.startScan(listOf(filter.build()), settings.build(), scanCallback)
+            scanStartBudget.recordStart()
             true
         } catch (e: SecurityException) {
             Log.e(TAG, "RADIO scan start permission failure: ${e.message}")
@@ -181,18 +189,57 @@ internal class GuestRadio(
         statusMessage: String,
         delayMs: Long,
     ) {
+        val generation = prepareScanRetry()
+        onStatus(statusMessage)
+        postScanRetry(generation, delayMs)
+    }
+
+    private fun scheduleScanCooldown(delayMs: Long) {
+        val generation = prepareScanRetry()
+        val retryAtMs = SystemClock.elapsedRealtime() + delayMs
+        updateCooldownStatus(generation, retryAtMs)
+        postScanRetry(generation, delayMs)
+    }
+
+    private fun prepareScanRetry(): Int {
         val generation = scanGeneration.incrementAndGet()
         scanning = false
         stopCurrentScan()
-        onStatus(statusMessage)
+        return generation
+    }
+
+    private fun postScanRetry(
+        generation: Int,
+        delayMs: Long,
+    ) {
         mainHandler.postDelayed(
             {
                 if (running && !torn && generation == scanGeneration.get()) {
-                    beginScan(statusMessage, keepTrying = true)
+                    beginScan(SCAN_STATUS, keepTrying = true)
                 }
             },
             delayMs,
         )
+    }
+
+    private fun updateCooldownStatus(
+        generation: Int,
+        retryAtMs: Long,
+    ) {
+        if (!running || torn || generation != scanGeneration.get()) return
+        val remainingMs = (retryAtMs - SystemClock.elapsedRealtime()).coerceAtLeast(0)
+        onStatus(scanCooldownStatus(remainingMs))
+        if (remainingMs == 0L) return
+        mainHandler.postDelayed(
+            { updateCooldownStatus(generation, retryAtMs) },
+            minOf(COOLDOWN_STATUS_TICK_MS, remainingMs),
+        )
+    }
+
+    private fun scanCooldownAfterFailure(): Long {
+        val budgetDelayMs = scanStartBudget.delayUntilAvailableMs()
+        if (budgetDelayMs > 0) return budgetDelayMs
+        return SCAN_START_WINDOW_MS
     }
 
     private fun scheduleScanRefresh() {
@@ -258,6 +305,10 @@ internal class GuestRadio(
             override fun onScanFailed(errorCode: Int) {
                 if (torn || !running) return
                 Log.e(TAG, "RADIO scan onScanFailed code=$errorCode")
+                if (errorCode == SCAN_FAILED_SCANNING_TOO_FREQUENTLY) {
+                    scheduleScanCooldown(scanCooldownAfterFailure())
+                    return
+                }
                 scheduleScanRetry(SCAN_STATUS, SCAN_RETRY_MS)
             }
         }
@@ -380,7 +431,17 @@ internal class GuestRadio(
         private const val SCAN_STATUS = "Scanning for host…"
         private const val GATT_RESCAN_DELAY_MS = 350L
         private const val SCAN_RETRY_MS = 750L
-        private const val SCAN_REFRESH_MS = 5_000L
+        private const val SCAN_REFRESH_MS = 10_000L
         private const val SCAN_REFRESH_RESTART_MS = 150L
+        private const val COOLDOWN_STATUS_TICK_MS = 100L
+        private const val SCAN_START_WINDOW_MS = 30_000L
+        private const val MAX_SCAN_STARTS_PER_WINDOW = 4
+        private const val SCAN_FAILED_SCANNING_TOO_FREQUENTLY = 6
+        private val scanStartBudget =
+            ScanStartBudget(
+                windowMs = SCAN_START_WINDOW_MS,
+                maxStarts = MAX_SCAN_STARTS_PER_WINDOW,
+                nowMs = { SystemClock.elapsedRealtime() },
+            )
     }
 }
