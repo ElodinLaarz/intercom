@@ -5,11 +5,14 @@
         android:name="android.hardware.bluetooth_le"
         android:required="true" />
 
-    <!-- M1.3 (#18): host advertise + GATT server + L2CAP listener. API 31+
-         runtime permissions, requested in MainActivity before hosting. SCAN
-         (guest, #19) is added with that issue. -->
+    <!-- BLE: advertise + GATT server + L2CAP (host, #18); scan + GATT client
+         (guest, #19). API 31+ runtime perms, requested in MainActivity per role.
+         SCAN is neverForLocation — we filter on manufacturer data, not location. -->
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
 
     <application
         android:label="Intercom"

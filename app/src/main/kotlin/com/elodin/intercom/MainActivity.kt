@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -22,33 +23,31 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.elodin.intercom.proto.Proto
-import com.elodin.intercom.radio.HostRadio
+import com.elodin.intercom.radio.RadioController
 
 /**
- * M1 tracer-bullet debug screen: two buttons start each role. Host (#18) is
- * wired — advertise + GATT + L2CAP; Join (guest scan) lands in #19. The
- * [HomeScreen] status line reflects the live host state. See M1_PLAN.md §3.
+ * M1 tracer-bullet debug screen: two buttons start each role (one role per
+ * phone). Host (#18) advertises + GATT + L2CAP; Join (#19) scans, connects, and
+ * reads the host's L2CAP PSM. Each is a start/stop toggle and they're mutually
+ * exclusive; [RadioController] holds the live state the status line renders. See
+ * M1_PLAN.md §3.
  */
 class MainActivity : ComponentActivity() {
-    private var hostRadio: HostRadio? = null
-    private var hostStatus by mutableStateOf("Idle — tap Host to advertise")
-    private var hostActive by mutableStateOf(false)
+    private val radio by lazy { RadioController(applicationContext) }
 
-    private val requestBlePermissions =
+    private val requestHostPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-            if (grants.values.all { it }) {
-                startHost()
-            } else {
-                Log.w(TAG, "BLE permissions denied — cannot host")
-            }
+            if (grants.values.all { it }) radio.startHost() else Log.w(TAG, "host perms denied")
+        }
+
+    private val requestGuestPermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+            if (grants.values.all { it }) radio.startGuest() else Log.w(TAG, "scan perms denied")
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,13 +59,11 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     HomeScreen(
-                        status = hostStatus,
-                        hosting = hostActive,
+                        status = radio.status,
+                        hosting = radio.hosting,
+                        scanning = radio.scanning,
                         onHost = { onHostButton() },
-                        onJoin = {
-                            Log.i(TAG, "TAP join (stub — guest scan is M1.4/#19)")
-                            hostStatus = "Join isn't wired yet — guest scan is #19"
-                        },
+                        onJoin = { onJoinButton() },
                     )
                 }
             }
@@ -74,46 +71,43 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        hostRadio?.stop()
+        radio.stopAll()
         super.onDestroy()
     }
 
-    private fun ensureHostPermissions() {
-        val perms =
-            arrayOf(
-                Manifest.permission.BLUETOOTH_ADVERTISE,
-                Manifest.permission.BLUETOOTH_CONNECT,
-            )
+    // Host and Join toggle and are mutually exclusive (one role per phone).
+    private fun onHostButton() {
+        if (radio.hosting) {
+            radio.stopHost()
+        } else {
+            ensurePermissions(
+                arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT),
+                requestHostPermissions,
+            ) { radio.startHost() }
+        }
+    }
+
+    private fun onJoinButton() {
+        if (radio.scanning) {
+            radio.stopGuest()
+        } else {
+            ensurePermissions(
+                arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT),
+                requestGuestPermissions,
+            ) { radio.startGuest() }
+        }
+    }
+
+    private fun ensurePermissions(
+        perms: Array<String>,
+        launcher: ActivityResultLauncher<Array<String>>,
+        onGranted: () -> Unit,
+    ) {
         val granted =
             perms.all {
                 ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
             }
-        if (granted) startHost() else requestBlePermissions.launch(perms)
-    }
-
-    // The Host button toggles: idle -> advertise, active -> stop. Every tap
-    // changes state and the status line, so the button always responds.
-    private fun onHostButton() {
-        if (hostActive) stopHost() else ensureHostPermissions()
-    }
-
-    private fun startHost() {
-        Log.i(TAG, "TAP host — starting advertise + GATT + L2CAP (M1.3/#18)")
-        val radio = HostRadio(applicationContext, ::onHostStatus)
-        hostRadio = radio
-        hostActive = true
-        radio.start()
-    }
-
-    private fun stopHost() {
-        Log.i(TAG, "TAP host — stopping")
-        hostRadio?.stop()
-        hostRadio = null
-        hostActive = false
-    }
-
-    private fun onHostStatus(message: String) {
-        runOnUiThread { hostStatus = message }
+        if (granted) onGranted() else launcher.launch(perms)
     }
 
     // selfTest can throw UnsatisfiedLinkError if the .so failed to load — log it
@@ -135,6 +129,7 @@ class MainActivity : ComponentActivity() {
 private fun HomeScreen(
     status: String,
     hosting: Boolean,
+    scanning: Boolean,
     onHost: () -> Unit,
     onJoin: () -> Unit,
 ) {
@@ -146,14 +141,14 @@ private fun HomeScreen(
         Text(text = "Intercom", style = MaterialTheme.typography.displayMedium)
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "M1 tracer — Host advertises; Join scans (#19)",
+            text = "M1 tracer — one role per phone",
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(48.dp))
         Row {
             Button(onClick = onHost) { Text(if (hosting) "Stop" else "Host") }
             Spacer(Modifier.width(24.dp))
-            OutlinedButton(onClick = onJoin) { Text("Join") }
+            OutlinedButton(onClick = onJoin) { Text(if (scanning) "Stop" else "Join") }
         }
         Spacer(Modifier.height(24.dp))
         Text(text = status, style = MaterialTheme.typography.bodySmall)
