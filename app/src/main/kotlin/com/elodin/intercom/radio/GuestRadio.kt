@@ -433,6 +433,7 @@ internal class GuestRadio(
         private const val SCAN_RETRY_MS = 750L
         private const val SCAN_REFRESH_MS = 10_000L
         private const val SCAN_REFRESH_RESTART_MS = 150L
+        private const val MIN_SCAN_START_INTERVAL_MS = 1_000L
         private const val COOLDOWN_STATUS_TICK_MS = 100L
         private const val SCAN_START_WINDOW_MS = 30_000L
         private const val MAX_SCAN_STARTS_PER_WINDOW = 4
@@ -441,6 +442,7 @@ internal class GuestRadio(
             ScanStartBudget(
                 windowMs = SCAN_START_WINDOW_MS,
                 maxStarts = MAX_SCAN_STARTS_PER_WINDOW,
+                minIntervalMs = MIN_SCAN_START_INTERVAL_MS,
                 nowMs = { SystemClock.elapsedRealtime() },
             )
     }

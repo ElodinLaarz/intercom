@@ -43,6 +43,23 @@ class ScanStartBudgetTest {
     }
 
     @Test
+    fun delaysUntilMinimumIntervalElapses() {
+        var nowMs = 0L
+        val budget =
+            ScanStartBudget(
+                windowMs = 30_000L,
+                maxStarts = 4,
+                minIntervalMs = 1_000L,
+                nowMs = { nowMs },
+            )
+
+        budget.recordStart()
+        nowMs = 250L
+
+        assertEquals(750L, budget.delayUntilAvailableMs())
+    }
+
+    @Test
     fun cooldownStatusShowsTenthsOfASecond() {
         assertEquals(
             "Rapid role changes — Bluetooth scan cooldown 3.2s",

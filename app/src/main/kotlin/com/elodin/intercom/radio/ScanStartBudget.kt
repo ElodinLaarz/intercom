@@ -3,6 +3,7 @@ package com.elodin.intercom.radio
 internal class ScanStartBudget(
     private val windowMs: Long,
     private val maxStarts: Int,
+    private val minIntervalMs: Long = 0,
     private val nowMs: () -> Long,
 ) {
     private val starts = ArrayDeque<Long>()
@@ -11,8 +12,7 @@ internal class ScanStartBudget(
     fun delayUntilAvailableMs(): Long {
         val now = nowMs()
         prune(now)
-        if (starts.size < maxStarts) return 0
-        return (windowMs - (now - starts.first())).coerceAtLeast(0)
+        return maxOf(windowDelayMs(now), intervalDelayMs(now))
     }
 
     @Synchronized
@@ -26,6 +26,16 @@ internal class ScanStartBudget(
         while (starts.isNotEmpty() && now - starts.first() >= windowMs) {
             starts.removeFirst()
         }
+    }
+
+    private fun windowDelayMs(now: Long): Long {
+        if (starts.size < maxStarts) return 0
+        return (windowMs - (now - starts.first())).coerceAtLeast(0)
+    }
+
+    private fun intervalDelayMs(now: Long): Long {
+        val previousStartMs = starts.lastOrNull() ?: return 0
+        return (minIntervalMs - (now - previousStartMs)).coerceAtLeast(0)
     }
 }
 
