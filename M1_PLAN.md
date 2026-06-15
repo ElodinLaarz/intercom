@@ -125,6 +125,13 @@ nibbles = 320 samples, not 321. Decode bounds-checks `stepIndex ∈ [0,88]`,
    (120 s, parse DIAG, assert rx≈tx ±5%, jitter bounded, 0 disconnects).
 10. **M1 gate** — run T1 on the rig; human confirms voice; update STATUS, close M1.
 
+**Debug affordance (deferred, non-gating) — [#29]:** a corner diagnostics button
+that snapshots the current link (role, epoch, advertising/scanning/connected, GATT
+state, L2CAP PSM) plus DIAG counters + a recent-events ring + device/env + `Proto`
+config into one self-contained artifact (Downloads file + share sheet) for **async
+repro studied later**. Build with/after step 9 (DIAG) — it reuses the same counters.
+Not required for the M1 voice gate; strip the button for release (M5).
+
 ## 4. Landmines applied THIS milestone (Appendix A)
 
 | # | Where | Step |
