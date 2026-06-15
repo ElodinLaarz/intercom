@@ -277,7 +277,8 @@ internal class HostRadio(
                     onStatus("Guest GATT connected — waiting for PSM read")
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     connectedGuests.remove(device)
-                    onStatus("Guest disconnected — advertising PSM $psm")
+                    Log.i(TAG, "RADIO gatt guest disconnected ${device.address}")
+                    onStatus("Advertising — PSM $psm — waiting for a guest")
                 }
             }
 

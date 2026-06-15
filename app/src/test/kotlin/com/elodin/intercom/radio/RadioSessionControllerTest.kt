@@ -13,14 +13,11 @@ class RadioSessionControllerTest {
         val guest = fixture.factory.guests.single()
 
         guest.status("Linked — host PSM 177 (L2CAP CoC is #20)")
-        guest.status("Host disconnected (status 19) — scanning for host…")
+        guest.status("Scanning for host…")
 
         assertTrue(fixture.controller.state.guesting)
         assertFalse(fixture.controller.state.hosting)
-        assertEquals(
-            "Host disconnected (status 19) — scanning for host…",
-            fixture.controller.state.status,
-        )
+        assertEquals("Scanning for host…", fixture.controller.state.status)
     }
 
     @Test

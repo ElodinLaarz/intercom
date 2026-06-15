@@ -13,11 +13,14 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.elodin.intercom.proto.Proto
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Guest side of the M1 link (issue #19, M1_PLAN §3 step 4): scan with a
@@ -40,6 +43,8 @@ internal class GuestRadio(
 ) : RadioEndpoint {
     private val serviceUuid: UUID = UUID.fromString(Proto.SERVICE_UUID)
     private val psmCharUuid: UUID = UUID.fromString(Proto.PSM_CHAR_UUID)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val scanGeneration = AtomicInteger(0)
 
     private var scanner: BluetoothLeScanner? = null
     private var gatt: BluetoothGatt? = null
@@ -73,11 +78,8 @@ internal class GuestRadio(
         torn = true
         running = false
         scanning = false
-        try {
-            scanner?.stopScan(scanCallback)
-        } catch (e: SecurityException) {
-            Log.w(TAG, "RADIO stop scan: ${e.message}")
-        }
+        scanGeneration.incrementAndGet()
+        stopCurrentScan()
         closeGatt(disconnect = true)
         scanner = null
         Log.i(TAG, "RADIO guest stopped")
@@ -99,7 +101,10 @@ internal class GuestRadio(
         return ByteBuffer.wrap(value).order(ByteOrder.LITTLE_ENDIAN).int
     }
 
-    private fun beginScan(statusMessage: String): Boolean {
+    private fun beginScan(
+        statusMessage: String,
+        keepTrying: Boolean = false,
+    ): Boolean {
         val manager = context.getSystemService(BluetoothManager::class.java)
         val ble = manager?.adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
         var started = false
@@ -123,10 +128,16 @@ internal class GuestRadio(
             settings.setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
             settings.setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
             settings.setReportDelay(0)
+            scanGeneration.incrementAndGet()
             Log.i(TAG, "RADIO scan start (MSD filter)")
             onStatus(statusMessage)
             started = startScan(ble, filter, settings)
             scanning = started
+            if (started) {
+                scheduleScanRefresh()
+            } else if (keepTrying && running && !torn) {
+                scheduleScanRetry(SCAN_STATUS, SCAN_RETRY_MS)
+            }
         }
         return started
     }
@@ -147,7 +158,6 @@ internal class GuestRadio(
         } catch (e: IllegalArgumentException) {
             Log.e(TAG, "RADIO scan start rejected: ${e.message}")
             onStatus("Scan failed to start")
-            stop(reportStopped = false)
             false
         }
 
@@ -163,7 +173,54 @@ internal class GuestRadio(
         Log.w(TAG, "RADIO $message")
         closeGatt(disconnect = false)
         if (running) {
-            beginScan("$message — scanning for host…")
+            scheduleScanRetry(SCAN_STATUS, GATT_RESCAN_DELAY_MS)
+        }
+    }
+
+    private fun scheduleScanRetry(
+        statusMessage: String,
+        delayMs: Long,
+    ) {
+        val generation = scanGeneration.incrementAndGet()
+        scanning = false
+        stopCurrentScan()
+        onStatus(statusMessage)
+        mainHandler.postDelayed(
+            {
+                if (running && !torn && generation == scanGeneration.get()) {
+                    beginScan(statusMessage, keepTrying = true)
+                }
+            },
+            delayMs,
+        )
+    }
+
+    private fun scheduleScanRefresh() {
+        val generation = scanGeneration.get()
+        mainHandler.postDelayed(
+            {
+                if (shouldRefreshScan(generation)) {
+                    Log.w(TAG, "RADIO scan watchdog refresh")
+                    scheduleScanRetry(SCAN_STATUS, SCAN_REFRESH_RESTART_MS)
+                }
+            },
+            SCAN_REFRESH_MS,
+        )
+    }
+
+    private fun shouldRefreshScan(generation: Int): Boolean {
+        val activeScan = running && scanning && !torn
+        val currentScan = generation == scanGeneration.get()
+        return activeScan && currentScan
+    }
+
+    private fun stopCurrentScan() {
+        try {
+            scanner?.stopScan(scanCallback)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "RADIO stop scan: ${e.message}")
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "RADIO stop scan rejected: ${e.message}")
         }
     }
 
@@ -191,20 +248,17 @@ internal class GuestRadio(
                 val device = result?.device ?: return
                 if (torn || !running || !scanning) return
                 scanning = false // got our host — stop scanning and connect
+                scanGeneration.incrementAndGet()
                 Log.i(TAG, "RADIO scan match ${device.address}")
                 onStatus("Found host ${device.address} — connecting…")
-                try {
-                    scanner?.stopScan(this)
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "RADIO stopScan: ${e.message}")
-                }
+                stopCurrentScan()
                 connectToHost(device)
             }
 
             override fun onScanFailed(errorCode: Int) {
-                if (torn) return
+                if (torn || !running) return
                 Log.e(TAG, "RADIO scan onScanFailed code=$errorCode")
-                fail("Scan failed (code $errorCode)")
+                scheduleScanRetry(SCAN_STATUS, SCAN_RETRY_MS)
             }
         }
 
@@ -315,5 +369,10 @@ internal class GuestRadio(
     companion object {
         private const val TAG = "INTERCOM"
         private const val MTU = 517
+        private const val SCAN_STATUS = "Scanning for host…"
+        private const val GATT_RESCAN_DELAY_MS = 350L
+        private const val SCAN_RETRY_MS = 750L
+        private const val SCAN_REFRESH_MS = 5_000L
+        private const val SCAN_REFRESH_RESTART_MS = 150L
     }
 }
