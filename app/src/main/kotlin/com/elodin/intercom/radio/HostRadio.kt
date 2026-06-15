@@ -89,9 +89,14 @@ class HostRadio(
         } catch (e: SecurityException) {
             Log.w(TAG, "RADIO stop advertise: ${e.message}")
         }
-        // Disconnect guests explicitly so they see the drop immediately instead
-        // of waiting out the BLE supervision timeout (rule 4: clean teardown).
-        connectedGuests.forEach { gattServer?.cancelConnection(it) }
+        // A GATT server can't drop a *client-initiated* connection with
+        // cancelConnection alone — "adopt" it via connect() first, then cancel,
+        // so the guest sees the disconnect immediately instead of waiting out the
+        // BLE supervision timeout (rule 4: clean teardown).
+        connectedGuests.forEach { device ->
+            gattServer?.connect(device, false)
+            gattServer?.cancelConnection(device)
+        }
         connectedGuests.clear()
         try {
             gattServer?.close()
