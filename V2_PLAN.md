@@ -7,10 +7,10 @@
 
 ## 1. Product definition
 
-**A private 1:1 intercom between two Android phones over Bluetooth LE.** One phone taps **Host**, the other taps **Join**, and from then on push-to-talk voice flows both ways — phone in pocket, screen off, wired or Bluetooth headset. Later, the pair can listen to shared media together while talking. Installed by sideload via Obtainium from Forgejo releases.
+**A private 1:1 intercom between two Android phones over Bluetooth LE.** One phone taps **Host**, the other taps **Guest**, and from then on push-to-talk voice flows both ways — phone in pocket, screen off, wired or Bluetooth headset. Later, the pair can listen to shared media together while talking. Installed by sideload via Obtainium from Forgejo releases.
 
 User stories:
-1. I tap Host; my partner taps Join; within seconds we can talk by holding a button.
+1. I tap Host; my partner taps Guest; within seconds we can talk by holding a button.
 2. I lock my phone and put it in my pocket; PTT still works (from the notification or a headset button).
 3. I connect my Shokz mid-conversation; audio moves to the headset without dying.
 4. We walk out of range and back; the link recovers by itself within a few seconds.
@@ -128,7 +128,7 @@ The rig before the app. Deliverables:
 **Gate:** one PR goes green on real CI; smoke script installs and verifies the stub on both phones.
 
 ### M1 — Tracer bullet (~1 week)
-One-directional voice between the two phones. Two debug buttons (Host / Join), no real UI, no service, screen on.
+One-directional voice between the two phones. Two debug buttons (Host / Guest), no real UI, no service, screen on.
 - Advertise with MSD; scan with MSD filter + continuous updates.
 - GATT connect: MTU 517, `requestConnectionPriority(HIGH)` on both sides, PSM exchange, L2CAP CoC open.
 - Audio pipeline per §4.2/§4.3, one direction (guest → host), open mic (no PTT yet).
@@ -144,7 +144,7 @@ One-directional voice between the two phones. Two debug buttons (Host / Join), n
 **Gate:** 10 consecutive reconnect storms — link recovers < 5 s each, **zero frames eaten after any reconnect** (the v1 watermark class, asserted via seq continuity in DIAG); then 10 min continuous duplex with stable jitter depth. *After this gate, agent-swarm work is permitted on validated paths (rule 6).*
 
 ### M3 — Product shell (~1 week)
-- Real UI: one main screen (Host / Join → linked view with PTT button + link status), minimal settings.
+- Real UI: one main screen (Host / Guest → linked view with PTT button + link status), minimal settings.
 - ForegroundService owns the session; notification with PTT affordance; MediaSession + audio focus; screen-off operation.
 - Switch to secure/bonded GATT + L2CAP (§4.5).
 - Volume rocker controls the correct stream (voice-call) — regression-asserted.

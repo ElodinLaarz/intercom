@@ -32,11 +32,12 @@ import java.util.UUID
  * thread (scan/GATT callbacks).
  */
 @SuppressLint("MissingPermission")
-class GuestRadio(
+@Suppress("TooManyFunctions")
+internal class GuestRadio(
     private val context: Context,
     private val onStatus: (String) -> Unit,
     private val onStopped: (GuestRadio) -> Unit = {},
-) {
+) : RadioEndpoint {
     private val serviceUuid: UUID = UUID.fromString(Proto.SERVICE_UUID)
     private val psmCharUuid: UUID = UUID.fromString(Proto.PSM_CHAR_UUID)
 
@@ -46,70 +47,39 @@ class GuestRadio(
     @Volatile
     private var running = false
 
+    @Volatile
+    private var scanning = false
+
     // Set once in stop(); a torn-down instance ignores its own late scan/GATT
     // callbacks so a buffered DISCONNECT can't clobber the next session's status
     // (rule 4 — destruction is the reset, no stale state across sessions).
     @Volatile
     private var torn = false
 
-    fun start(): Boolean {
+    override fun start(): Boolean {
         if (running) return true
         torn = false
-        val manager = context.getSystemService(BluetoothManager::class.java)
-        val ble = manager?.adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
-        var started = false
-        if (ble == null) {
-            Log.e(TAG, "RADIO ERROR bluetooth off or LE scan unsupported")
-            onStatus("Can't scan — turn Bluetooth on")
-        } else {
-            running = true
-            scanner = ble
-            // Filter on the host's minimal MSD adv ([0x01,0x01]) — not the 128-bit
-            // UUID, which the host omits from the adv PDU. Continuous + aggressive
-            // matching (landmine #2): first-match/unfiltered scans get demoted.
-            val filter = ScanFilter.Builder()
-            filter.setManufacturerData(
-                Proto.MSD_COMPANY_ID,
-                byteArrayOf(Proto.MSD_PATTERN0.toByte(), Proto.MSD_PATTERN1.toByte()),
-            )
-            val settings = ScanSettings.Builder()
-            settings.setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            settings.setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-            settings.setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-            settings.setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
-            settings.setReportDelay(0)
-            Log.i(TAG, "RADIO scan start (MSD filter)")
-            onStatus("Scanning for host…")
-            started = startScan(ble, filter, settings)
-        }
+        running = true
+        val started = beginScan("Scanning for host…")
+        if (!started) running = false
         return started
     }
 
-    fun stop() {
+    override fun stop() {
         stop(reportStopped = true)
     }
 
     private fun stop(reportStopped: Boolean) {
         torn = true
         running = false
+        scanning = false
         try {
             scanner?.stopScan(scanCallback)
         } catch (e: SecurityException) {
             Log.w(TAG, "RADIO stop scan: ${e.message}")
         }
-        val closingGatt = gatt
-        try {
-            closingGatt?.disconnect()
-        } catch (e: SecurityException) {
-            Log.w(TAG, "RADIO disconnect gatt: ${e.message}")
-        }
-        try {
-            closingGatt?.close()
-        } catch (e: SecurityException) {
-            Log.w(TAG, "RADIO stop gatt: ${e.message}")
-        }
+        closeGatt(disconnect = true)
         scanner = null
-        gatt = null
         Log.i(TAG, "RADIO guest stopped")
         if (reportStopped) onStatus("Stopped")
         onStopped(this)
@@ -127,6 +97,38 @@ class GuestRadio(
     private fun parsePsm(value: ByteArray?): Int {
         if (value == null || value.size < Integer.BYTES) return -1
         return ByteBuffer.wrap(value).order(ByteOrder.LITTLE_ENDIAN).int
+    }
+
+    private fun beginScan(statusMessage: String): Boolean {
+        val manager = context.getSystemService(BluetoothManager::class.java)
+        val ble = manager?.adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
+        var started = false
+        if (ble == null) {
+            Log.e(TAG, "RADIO ERROR bluetooth off or LE scan unsupported")
+            onStatus("Can't scan — turn Bluetooth on")
+            stop(reportStopped = false)
+        } else {
+            scanner = ble
+            // Filter on the host's minimal MSD adv ([0x01,0x01]) — not the 128-bit
+            // UUID, which the host omits from the adv PDU. Continuous + aggressive
+            // matching (landmine #2): first-match/unfiltered scans get demoted.
+            val filter = ScanFilter.Builder()
+            filter.setManufacturerData(
+                Proto.MSD_COMPANY_ID,
+                byteArrayOf(Proto.MSD_PATTERN0.toByte(), Proto.MSD_PATTERN1.toByte()),
+            )
+            val settings = ScanSettings.Builder()
+            settings.setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            settings.setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+            settings.setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+            settings.setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
+            settings.setReportDelay(0)
+            Log.i(TAG, "RADIO scan start (MSD filter)")
+            onStatus(statusMessage)
+            started = startScan(ble, filter, settings)
+            scanning = started
+        }
+        return started
     }
 
     private fun startScan(
@@ -156,6 +158,30 @@ class GuestRadio(
         stop(reportStopped = false)
     }
 
+    private fun retryScanAfterGatt(message: String) {
+        if (torn) return
+        Log.w(TAG, "RADIO $message")
+        closeGatt(disconnect = false)
+        if (running) {
+            beginScan("$message — scanning for host…")
+        }
+    }
+
+    private fun closeGatt(disconnect: Boolean) {
+        val closingGatt = gatt
+        gatt = null
+        try {
+            if (disconnect) closingGatt?.disconnect()
+        } catch (e: SecurityException) {
+            Log.w(TAG, "RADIO disconnect gatt: ${e.message}")
+        }
+        try {
+            closingGatt?.close()
+        } catch (e: SecurityException) {
+            Log.w(TAG, "RADIO stop gatt: ${e.message}")
+        }
+    }
+
     private val scanCallback =
         object : ScanCallback() {
             override fun onScanResult(
@@ -163,8 +189,8 @@ class GuestRadio(
                 result: ScanResult?,
             ) {
                 val device = result?.device ?: return
-                if (torn || !running) return
-                running = false // got our host — stop scanning and connect
+                if (torn || !running || !scanning) return
+                scanning = false // got our host — stop scanning and connect
                 Log.i(TAG, "RADIO scan match ${device.address}")
                 onStatus("Found host ${device.address} — connecting…")
                 try {
@@ -204,8 +230,7 @@ class GuestRadio(
                         discoverServices(connectedGatt)
                     }
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    onStatus("Disconnected (status $status)")
-                    stop(reportStopped = false)
+                    retryScanAfterGatt("Host disconnected (status $status)")
                 }
             }
 

@@ -43,11 +43,11 @@ import kotlin.concurrent.thread
  * marshals to the main thread.
  */
 @SuppressLint("MissingPermission")
-class HostRadio(
+internal class HostRadio(
     private val context: Context,
     private val onStatus: (String) -> Unit,
     private val onStopped: (HostRadio) -> Unit = {},
-) {
+) : RadioEndpoint {
     private val serviceUuid: UUID = UUID.fromString(Proto.SERVICE_UUID)
     private val psmCharUuid: UUID = UUID.fromString(Proto.PSM_CHAR_UUID)
 
@@ -65,7 +65,7 @@ class HostRadio(
     private var torn = false
 
     /** Open the L2CAP listener, publish its PSM over GATT, and start advertising. */
-    fun start(): Boolean {
+    override fun start(): Boolean {
         if (running) return true
         torn = false
         val manager = context.getSystemService(BluetoothManager::class.java)
@@ -95,7 +95,7 @@ class HostRadio(
     }
 
     /** Tear everything down. Idempotent. */
-    fun stop() {
+    override fun stop() {
         stop(reportStopped = true)
     }
 

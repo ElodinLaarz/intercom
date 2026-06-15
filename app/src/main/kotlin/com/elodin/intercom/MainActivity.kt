@@ -32,7 +32,7 @@ import com.elodin.intercom.radio.RadioController
 
 /**
  * M1 tracer-bullet debug screen: two buttons start each role (one role per
- * phone). Host (#18) advertises + GATT + L2CAP; Join (#19) scans, connects, and
+ * phone). Host (#18) advertises + GATT + L2CAP; Guest (#19) scans, connects, and
  * reads the host's L2CAP PSM. Each is a start/stop toggle and they're mutually
  * exclusive; [RadioController] holds the live state the status line renders. See
  * M1_PLAN.md §3.
@@ -61,9 +61,9 @@ class MainActivity : ComponentActivity() {
                     HomeScreen(
                         status = radio.status,
                         hosting = radio.hosting,
-                        scanning = radio.scanning,
+                        guesting = radio.guesting,
                         onHost = { onHostButton() },
-                        onJoin = { onJoinButton() },
+                        onGuest = { onGuestButton() },
                     )
                 }
             }
@@ -75,7 +75,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    // Host and Join toggle and are mutually exclusive (one role per phone).
+    // Host and Guest toggle and are mutually exclusive (one role per phone).
     private fun onHostButton() {
         if (radio.hosting) {
             radio.stopHost()
@@ -87,8 +87,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun onJoinButton() {
-        if (radio.scanning) {
+    private fun onGuestButton() {
+        if (radio.guesting) {
             radio.stopGuest()
         } else {
             ensurePermissions(
@@ -129,9 +129,9 @@ class MainActivity : ComponentActivity() {
 private fun HomeScreen(
     status: String,
     hosting: Boolean,
-    scanning: Boolean,
+    guesting: Boolean,
     onHost: () -> Unit,
-    onJoin: () -> Unit,
+    onGuest: () -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding(32.dp),
@@ -148,7 +148,7 @@ private fun HomeScreen(
         Row {
             Button(onClick = onHost) { Text(if (hosting) "Stop" else "Host") }
             Spacer(Modifier.width(24.dp))
-            OutlinedButton(onClick = onJoin) { Text(if (scanning) "Stop" else "Join") }
+            OutlinedButton(onClick = onGuest) { Text(if (guesting) "Stop" else "Guest") }
         }
         Spacer(Modifier.height(24.dp))
         Text(text = status, style = MaterialTheme.typography.bodySmall)
