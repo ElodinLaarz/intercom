@@ -1,7 +1,7 @@
 # Intercom
 
 A private 1:1 push-to-talk intercom between two Android phones over Bluetooth LE.
-Pure native: Kotlin + Jetpack Compose + C++ (Oboe/Opus). Distributed by sideload
+Pure native: Kotlin + Jetpack Compose + C++ (Oboe + ADPCM). Distributed by sideload
 (Obtainium) from Forgejo releases. Android 12+ (minSdk 31).
 
 This is the greenfield v2 restart of `walkie-talkie`. No v1 code was carried over —
@@ -20,7 +20,7 @@ only lessons.
 ```
 
 Requires JDK 17+ and an Android SDK (`local.properties` → `sdk.dir`). Native code
-(Oboe/Opus) arrives in M1 and will add NDK + cmake requirements.
+(Oboe + ADPCM) arrives in M1 and will add NDK + cmake requirements.
 
 ## Rules of the repo
 

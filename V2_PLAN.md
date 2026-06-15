@@ -28,7 +28,8 @@ User stories:
 | Decision | Choice | Rationale |
 |---|---|---|
 | Code reuse | **True greenfield** — zero v1 code copied | Clean slate; only lessons, runbooks, and the landmine list (Appendix A) carry over |
-| Stack | **Pure native Android**: Kotlin + Jetpack Compose + C++ (Oboe, Opus) | Eliminates the Dart↔native bridge that produced v1's duplicated-state bug class (POSTMORTEM RC3). BLE host side was already native in v1; this finishes the job |
+| Stack | **Pure native Android**: Kotlin + Jetpack Compose + C++ (Oboe, ADPCM) | Eliminates the Dart↔native bridge that produced v1's duplicated-state bug class (POSTMORTEM RC3). BLE host side was already native in v1; this finishes the job |
+| Voice codec *(amended 2026-06-14)* | **ADPCM (IMA/G.726)** — was Opus | 1:1 speech needs neither Opus's bitrate-scaling nor its CPU/integration weight. <1 ms codec delay, ~4:1, no vendored lib (deletes the libopus submodule, landmine #11). End-to-end latency stays BLE-bound (~50–120 ms one-way) regardless of codec. Trade-off: no in-band FEC, so loss-resilience (light redundancy / PLC) is designed into the voice path (M1), not bolted on after a symptom appears |
 | Topology | **1:1 only** | No mixer, no relay, no mix-minus engine — deletes v1's hardest audio code outright |
 | End features | Background/screen-off ✓ · BT headset ✓ · shared media ✓ · handover ✗ | Per scope decision; handover is moot at 1:1 |
 | Distribution | **Obtainium/sideload only** | Forgejo release pipeline → signed APK; no Play compliance surface |
@@ -61,7 +62,7 @@ User stories:
 │            Single-threaded dispatcher.           │
 ├──────────────────────┬──────────────────────────┤
 │ radio/  Kotlin       │ audio/  C++ (JNI)         │
-│ advertiser, scanner, │ Oboe in/out, Opus enc/dec,│
+│ advertiser, scanner, │ Oboe in/out, ADPCM enc/dec│
 │ GATT server+client,  │ jitter buffer, ring,      │
 │ L2CAP socket, epochs │ telemetry counters        │
 ├──────────────────────┴──────────────────────────┤
@@ -85,15 +86,15 @@ Both phones can host or join; the asymmetry exists only during link-up.
 ### 4.2 Voice path (1:1 — no mixer)
 
 ```
-mic → Oboe input (Shared, 24 kHz mono) → Opus encode (32 kbps, FEC on, 20 ms frames)
+mic → Oboe input (Shared, mono) → ADPCM encode (IMA/G.726, 4:1; sample rate + frame size set at voice-path design)
     → seq+epoch header → L2CAP write
 L2CAP read → header check (epoch must match, seq filter) → jitter buffer (drift-tolerant)
-    → Opus decode → Oboe output (Shared, VoiceCommunication usage)
+    → ADPCM decode → Oboe output (Shared, VoiceCommunication usage)
 ```
 
 - PTT gates the **encode/send** side only; receive path always live while linked.
 - Telemetry from day one: a `DIAG` log line every 2 s with txSeq, rxSeq, queue depth, jitter depth, underruns — the smoke script greps these.
-- Codec settings start at v1's validated endpoint (24 kHz, 32 kbps, FEC on, complexity 10) and are **not adaptive** until a measured need appears. v1's adaptation loop *caused* its quality bug; 1:1 BLE with a high-priority connection has bandwidth to spare (~50 kbps incl. overhead vs ~700+ kbps available on 2M PHY).
+- ADPCM is fixed-rate (no bitrate ladder, no complexity knob), so there is **nothing to make adaptive** — sidestepping v1's adaptation-loop quality bug by construction. At ~4:1 the link has ample headroom (≈64 kbps for 16 kHz mono incl. overhead vs ~700+ kbps available on 2M PHY). ADPCM carries **no in-band FEC**, so packet-loss handling is a transport concern: a light redundancy / PLC scheme is part of the voice-path design (M1), not an afterthought.
 
 ### 4.3 Audio platform setup (order matters — v1 receipts in Appendix A)
 
@@ -215,7 +216,7 @@ Every item cost real debugging time in v1. Apply at the milestone noted; treat d
 | 8 | One-shot immediate restarts race route settling (esp. BT connect) and then give up | Every restart path: bounded backoff ladder (150/300/600/1000/1500 ms) | #464 | M1 |
 | 9 | Per-link state surviving reconnect eats frames (watermarks, jitter buffers — in **every** layer that holds state) | Epoch-scoped construction/destruction; no reset() methods | Blocker 2, #130, #476 (one never fixed) | M2 |
 | 10 | Constants duplicated across languages drift and fight (bitrate ladders) | Single source in `proto/constants.h` + codegen + CI duplicate-literal check | 05-31 root cause #1 | M0 |
-| 11 | Git submodule (opus) silently absent in fresh clones; piping builds through `tail` hides the failure | Bootstrap script verifies + fails loud; never filter build output | v1 worktree trap | M0 |
+| 11 | ~~Git submodule (opus) silently absent in fresh clones~~ — **N/A in v2** (ADPCM needs no vendored codec, 2026-06-14); the broader trap stands: piping builds through `tail` hides native failures | Bootstrap verifies JDK/NDK/cmake + fails loud; never filter build output | v1 worktree trap | M0 |
 | 12 | Unbounded wire-field decodes (lengths, counts, floats) | Bounds-check every field at decode; property/bounds tests per message type from the start | ~dozens of June clamp PRs | M1+ |
 | 13 | Motorola BLE advertising payload overflow | Keep advertising payload minimal; moto is the canary device | #381 | M1 |
 | 14 | CI that doesn't check out the PR head validates nothing | CI echoes head sha; merge gate requires the `pull_request`-context run | Forgejo #59 | M0 |
