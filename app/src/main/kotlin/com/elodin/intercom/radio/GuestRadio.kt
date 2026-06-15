@@ -97,8 +97,14 @@ class GuestRadio(
         } catch (e: SecurityException) {
             Log.w(TAG, "RADIO stop scan: ${e.message}")
         }
+        val closingGatt = gatt
         try {
-            gatt?.close()
+            closingGatt?.disconnect()
+        } catch (e: SecurityException) {
+            Log.w(TAG, "RADIO disconnect gatt: ${e.message}")
+        }
+        try {
+            closingGatt?.close()
         } catch (e: SecurityException) {
             Log.w(TAG, "RADIO stop gatt: ${e.message}")
         }

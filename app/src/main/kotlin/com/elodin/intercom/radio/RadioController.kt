@@ -31,10 +31,17 @@ class RadioController(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var host: HostRadio? = null
     private var guest: GuestRadio? = null
+    private var sessionToken = 0
 
     fun startHost() {
-        stopGuest()
-        val radio = HostRadio(context, ::onStatus, ::onHostStopped)
+        stopGuest(reportStatus = false)
+        val token = nextSessionToken()
+        val radio =
+            HostRadio(
+                context = context,
+                onStatus = { message -> onStatus(token, message) },
+                onStopped = { stopped -> onHostStopped(token, stopped) },
+            )
         host = radio
         if (radio.start()) {
             hosting = true
@@ -45,8 +52,14 @@ class RadioController(
     }
 
     fun startGuest() {
-        stopHost()
-        val radio = GuestRadio(context, ::onStatus, ::onGuestStopped)
+        stopHost(reportStatus = false)
+        val token = nextSessionToken()
+        val radio =
+            GuestRadio(
+                context = context,
+                onStatus = { message -> onStatus(token, message) },
+                onStopped = { stopped -> onGuestStopped(token, stopped) },
+            )
         guest = radio
         if (radio.start()) {
             scanning = true
@@ -56,22 +69,26 @@ class RadioController(
         }
     }
 
-    fun stopHost() {
+    fun stopHost(reportStatus: Boolean = true) {
         val radio = host ?: return
+        nextSessionToken()
         radio.stop()
         if (host === radio) {
             host = null
             hosting = false
         }
+        if (reportStatus) showStatus("Stopped")
     }
 
-    fun stopGuest() {
+    fun stopGuest(reportStatus: Boolean = true) {
         val radio = guest ?: return
+        nextSessionToken()
         radio.stop()
         if (guest === radio) {
             guest = null
             scanning = false
         }
+        if (reportStatus) showStatus("Stopped")
     }
 
     fun stopAll() {
@@ -79,7 +96,12 @@ class RadioController(
         stopGuest()
     }
 
-    private fun onStatus(message: String) {
+    private fun nextSessionToken(): Int {
+        sessionToken += 1
+        return sessionToken
+    }
+
+    private fun showStatus(message: String) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             status = message
         } else {
@@ -87,18 +109,37 @@ class RadioController(
         }
     }
 
-    private fun onHostStopped(radio: HostRadio) {
+    private fun onStatus(
+        token: Int,
+        message: String,
+    ) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (token == sessionToken) status = message
+        } else {
+            mainHandler.post {
+                if (token == sessionToken) status = message
+            }
+        }
+    }
+
+    private fun onHostStopped(
+        token: Int,
+        radio: HostRadio,
+    ) {
         mainHandler.post {
-            if (host === radio) {
+            if (token == sessionToken && host === radio) {
                 host = null
                 hosting = false
             }
         }
     }
 
-    private fun onGuestStopped(radio: GuestRadio) {
+    private fun onGuestStopped(
+        token: Int,
+        radio: GuestRadio,
+    ) {
         mainHandler.post {
-            if (guest === radio) {
+            if (token == sessionToken && guest === radio) {
                 guest = null
                 scanning = false
             }

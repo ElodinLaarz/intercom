@@ -159,10 +159,12 @@ class HostRadio(
         try {
             while (running) {
                 val client = socket.accept()
-                Log.i(TAG, "RADIO l2cap accepted ${client.remoteDevice?.address}")
-                onStatus("Guest connected (L2CAP) — ${client.remoteDevice?.address}")
+                val address = client.remoteDevice?.address
+                Log.i(TAG, "RADIO l2cap accepted $address")
+                onStatus("L2CAP accepted from $address — closing until #20")
                 // Frame I/O is #20; this PR only proves the listener accepts.
                 client.close()
+                if (running) onStatus("Advertising — PSM $psm — waiting for a guest")
             }
         } catch (e: IOException) {
             if (running) Log.w(TAG, "RADIO l2cap accept ended: ${e.message}")
@@ -272,8 +274,10 @@ class HostRadio(
                 if (device == null) return
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     connectedGuests.add(device)
+                    onStatus("Guest GATT connected — waiting for PSM read")
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     connectedGuests.remove(device)
+                    onStatus("Guest disconnected — advertising PSM $psm")
                 }
             }
 
@@ -290,7 +294,7 @@ class HostRadio(
                         offset in 0..psmBytes.size
                 if (ok) {
                     Log.i(TAG, "RADIO gatt read psm by ${device?.address} offset=$offset")
-                    onStatus("Guest read PSM — ${device?.address}")
+                    onStatus("Guest read PSM — waiting for L2CAP")
                     gattServer?.sendResponse(
                         device,
                         requestId,
