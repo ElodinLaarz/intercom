@@ -1,7 +1,7 @@
 # M1 — Tracer Bullet: design + todo
 
-**Drafted 2026-06-14** (M0 closed the same day — see STATUS.md). **Design-gated:
-review §2 with the owner before writing voice code.**
+**Drafted 2026-06-14** (M0 closed the same day — see STATUS.md). **§2 signed off
+2026-06-14 (issue #16) — params locked below; voice code unblocked.**
 
 Companions: [V2_PLAN.md](V2_PLAN.md) §5 (M1), §4 (architecture), Appendix A
 (landmines). [STATUS.md](STATUS.md) is the only status that counts.
@@ -38,7 +38,7 @@ Kotlin-owned; C++ produces/consumes frame **bytes** over JNI, Kotlin does the
 socket I/O. Audio callback (real-time) threads never touch session state — they
 communicate through SPSC ring buffers (reuse the M0 `RingBuffer`).
 
-## 2. Voice-path / ADPCM design — DRAFT, review before code
+## 2. Voice-path / ADPCM design — LOCKED 2026-06-14 (issue #16)
 
 Locks the "codec before voice" decision (PR #8) into concrete numbers.
 
@@ -77,9 +77,29 @@ Locks the "codec before voice" decision (PR #8) into concrete numbers.
   per-link object (SeqFilter, jitter buffer, codec state, rings) is constructed
   when the epoch begins and destroyed on disconnect. No `reset()`.
 
-**Resolve at review:** jitter target depth (start ~3 frames ≈ 60 ms); PLC in M1
-(default: silence-fill); 16 vs 8 kHz (default 16, confirm on hardware); confirm
-the Kotlin-writes-socket boundary vs passing the fd to C++ (default: Kotlin).
+**Resolved 2026-06-14 (owner sign-off, issue #16):**
+
+- **Sample rate: 16 kHz** wideband PCM16 mono. 68.8 kbps payload ≪ ~700 kbps 2M-PHY
+  budget — throughput is not the constraint. 8 kHz stays a one-constant fallback if
+  the rig disappoints.
+- **Jitter target depth: 3 frames (~60 ms)** as the *starting* value, tuned on the
+  rig via DIAG `jitterMs`. Keeps one-way latency in the 50–120 ms band.
+- **PLC: silence-fill.** On a detected seq gap, emit one 20 ms silent frame to hold
+  output-clock alignment. Self-contained frames cap a single loss at one 20 ms gap.
+  Last-frame-repeat is deferred to M2.
+- **Socket ownership: Kotlin owns the L2CAP `BluetoothSocket`** (rule 3). C++
+  produces/consumes frame **bytes** over JNI (~50 calls/s — negligible). No fd is
+  handed to C++; this is what keeps the socket single-owner.
+
+**Codec contract for #17 (pre-roll IMA, self-contained frames):** the encoder runs
+a *continuous* IMA predictor (for quality) but **snapshots** its current
+`(predSample, stepIndex)` into each frame header at the 320-sample boundary — it does
+*not* reset. The decoder loads that snapshot and decodes the 160 nibble-bytes into
+**exactly 320 PCM16 samples**, independent of any other frame (lose a frame → lose
+one 20 ms gap; the next frame self-heals from its own header). `predSample` is
+pre-roll predictor state, **not** emitted as output — which is why 160 B = 320
+nibbles = 320 samples, not 321. Decode bounds-checks `stepIndex ∈ [0,88]`,
+`reserved == 0`, and gates epoch/seq through `SeqFilter` (landmine #12).
 
 ## 3. Ordered steps (→ Forgejo `M1:` issues; respect deps)
 
