@@ -34,30 +34,44 @@ class RadioController(
 
     fun startHost() {
         stopGuest()
-        val radio = HostRadio(context, ::onStatus)
+        val radio = HostRadio(context, ::onStatus, ::onHostStopped)
         host = radio
-        hosting = true
-        radio.start()
+        if (radio.start()) {
+            hosting = true
+        } else if (host === radio) {
+            host = null
+            hosting = false
+        }
     }
 
     fun startGuest() {
         stopHost()
-        val radio = GuestRadio(context, ::onStatus)
+        val radio = GuestRadio(context, ::onStatus, ::onGuestStopped)
         guest = radio
-        scanning = true
-        radio.start()
+        if (radio.start()) {
+            scanning = true
+        } else if (guest === radio) {
+            guest = null
+            scanning = false
+        }
     }
 
     fun stopHost() {
-        host?.stop()
-        host = null
-        hosting = false
+        val radio = host ?: return
+        radio.stop()
+        if (host === radio) {
+            host = null
+            hosting = false
+        }
     }
 
     fun stopGuest() {
-        guest?.stop()
-        guest = null
-        scanning = false
+        val radio = guest ?: return
+        radio.stop()
+        if (guest === radio) {
+            guest = null
+            scanning = false
+        }
     }
 
     fun stopAll() {
@@ -66,6 +80,28 @@ class RadioController(
     }
 
     private fun onStatus(message: String) {
-        mainHandler.post { status = message }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            status = message
+        } else {
+            mainHandler.post { status = message }
+        }
+    }
+
+    private fun onHostStopped(radio: HostRadio) {
+        mainHandler.post {
+            if (host === radio) {
+                host = null
+                hosting = false
+            }
+        }
+    }
+
+    private fun onGuestStopped(radio: GuestRadio) {
+        mainHandler.post {
+            if (guest === radio) {
+                guest = null
+                scanning = false
+            }
+        }
     }
 }
