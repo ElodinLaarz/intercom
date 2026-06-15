@@ -38,6 +38,9 @@ jobs:
           "$SM" --install "ndk;27.2.12479018" "cmake;3.22.1"
           echo "installed:"; ls "$SDK/ndk" "$SDK/cmake"
 
+      - name: Preflight (bootstrap — fail loud)
+        run: bash scripts/bootstrap.sh
+
       - name: Native host tests (ctest)
         run: |
           set -e
