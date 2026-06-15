@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# tools/smoke — install the debug APK on each connected phone, launch it, and
+# assert the expected logcat signal. This IS the M0 gate mechanism (V2_PLAN §5):
+# proven now against the stub, reused unchanged for every radio/audio PR later.
+#
+# Usage:
+#   tools/smoke [adb-serial ...]
+#
+# With no serials, every 'device'-state entry from `adb devices` is used. The
+# phones reach this host over Tailscale adb (pixel 100.97.27.15, moto
+# 100.69.181.85 — see README). Exits non-zero if any phone fails the asserts.
+#
+# Env knobs: SMOKE_WAIT (seconds to wait after launch, default 3).
+set -u
+
+TAG="INTERCOM"
+PKG="com.elodin.intercom"
+ACT="$PKG/.MainActivity"
+APK="app/build/outputs/apk/debug/app-debug.apk"
+WAIT="${SMOKE_WAIT:-3}"
+
+# Required log signals — all must appear (extended regex against `logcat -s`).
+WANT_STARTED='INTERCOM.*STARTED version='
+WANT_NATIVE='INTERCOM.*NATIVE selfTest=0xC0DE'
+
+cd "$(dirname "$0")/.." || exit 2
+log()  { printf '%s\n' "$*"; }
+die()  { printf 'smoke: %s\n' "$*" >&2; exit 2; }
+
+command -v adb >/dev/null 2>&1 || die "adb not on PATH"
+
+# --- resolve target serials ---
+SERIALS=("$@")
+if [ "${#SERIALS[@]}" -eq 0 ]; then
+  while read -r s state _; do
+    [ "$state" = "device" ] && SERIALS+=("$s")
+  done < <(adb devices | tail -n +2)
+fi
+[ "${#SERIALS[@]}" -gt 0 ] || die "no devices — pass serials or pair the phones (README: wireless debugging)"
+[ "${#SERIALS[@]}" -ge 2 ] || log "WARNING: only ${#SERIALS[@]} device(s); the M0 gate wants both rig phones"
+
+# --- build the APK if it isn't there ---
+if [ ! -f "$APK" ]; then
+  log "building debug APK…"
+  ./gradlew --no-daemon assembleDebug || die "assembleDebug failed"
+fi
+[ -f "$APK" ] || die "APK not found at $APK"
+
+FAILS=0
+for S in "${SERIALS[@]}"; do
+  log ""
+  log "===== $S ====="
+  MODEL=$(adb -s "$S" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+  log "model: ${MODEL:-?}"
+
+  if ! adb -s "$S" install -r "$APK" >/dev/null 2>&1; then
+    log "  FAIL: install"; FAILS=$((FAILS + 1)); continue
+  fi
+  adb -s "$S" shell am force-stop "$PKG" >/dev/null 2>&1
+  adb -s "$S" logcat -c >/dev/null 2>&1
+  if ! adb -s "$S" shell am start -n "$ACT" >/dev/null 2>&1; then
+    log "  FAIL: launch"; FAILS=$((FAILS + 1)); continue
+  fi
+  sleep "$WAIT"
+
+  OUT=$(adb -s "$S" logcat -d -s "$TAG:I" 2>/dev/null || true)
+  printf '%s\n' "$OUT" | grep -E 'STARTED|NATIVE' | sed 's/^/  | /'
+
+  started=0; native=0
+  printf '%s\n' "$OUT" | grep -Eq "$WANT_STARTED" && started=1
+  printf '%s\n' "$OUT" | grep -Eq "$WANT_NATIVE" && native=1
+  if [ "$started" -eq 1 ] && [ "$native" -eq 1 ]; then
+    log "  PASS"
+  else
+    log "  FAIL (started=$started native=$native)"; FAILS=$((FAILS + 1))
+  fi
+done
+
+log ""
+if [ "$FAILS" -ne 0 ]; then die "SMOKE FAILED on $FAILS device(s)"; fi
+log "SMOKE PASS on ${#SERIALS[@]} device(s)"
