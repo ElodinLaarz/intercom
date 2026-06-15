@@ -45,6 +45,12 @@ class GuestRadio(
     @Volatile
     private var running = false
 
+    // Set once in stop(); a torn-down instance ignores its own late scan/GATT
+    // callbacks so a buffered DISCONNECT can't clobber the next session's status
+    // (rule 4 — destruction is the reset, no stale state across sessions).
+    @Volatile
+    private var torn = false
+
     fun start() {
         if (running) return
         val manager = context.getSystemService(BluetoothManager::class.java)
@@ -76,6 +82,7 @@ class GuestRadio(
     }
 
     fun stop() {
+        torn = true
         running = false
         try {
             scanner?.stopScan(scanCallback)
@@ -109,7 +116,7 @@ class GuestRadio(
                 result: ScanResult?,
             ) {
                 val device = result?.device ?: return
-                if (!running) return
+                if (torn || !running) return
                 running = false // got our host — stop scanning and connect
                 Log.i(TAG, "RADIO scan match ${device.address}")
                 onStatus("Found host ${device.address} — connecting…")
@@ -122,6 +129,7 @@ class GuestRadio(
             }
 
             override fun onScanFailed(errorCode: Int) {
+                if (torn) return
                 Log.e(TAG, "RADIO scan onScanFailed code=$errorCode")
                 onStatus("Scan failed (code $errorCode)")
             }
@@ -134,6 +142,7 @@ class GuestRadio(
                 status: Int,
                 newState: Int,
             ) {
+                if (torn) return
                 Log.i(TAG, "RADIO gatt conn status=$status newState=$newState")
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     onStatus("Connected — negotiating link…")
@@ -151,6 +160,7 @@ class GuestRadio(
                 mtu: Int,
                 status: Int,
             ) {
+                if (torn) return
                 Log.i(TAG, "RADIO gatt mtu=$mtu status=$status")
                 onStatus("MTU $mtu — discovering services…")
                 g?.discoverServices()
@@ -160,6 +170,7 @@ class GuestRadio(
                 g: BluetoothGatt?,
                 status: Int,
             ) {
+                if (torn) return
                 val characteristic = g?.getService(serviceUuid)?.getCharacteristic(psmCharUuid)
                 if (characteristic == null) {
                     Log.w(TAG, "RADIO gatt PSM characteristic not found status=$status")
@@ -177,6 +188,7 @@ class GuestRadio(
                 characteristic: BluetoothGattCharacteristic?,
                 status: Int,
             ) {
+                if (torn) return
                 val psm = parsePsm(characteristic?.value)
                 Log.i(TAG, "RADIO gatt read PSM=$psm status=$status")
                 onStatus("Linked — host PSM $psm (L2CAP CoC is #20)")

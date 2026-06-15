@@ -9,6 +9,7 @@ import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
@@ -21,6 +22,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArraySet
 import kotlin.concurrent.thread
 
 /**
@@ -53,6 +55,7 @@ class HostRadio(
     private var serverSocket: BluetoothServerSocket? = null
     private var psmBytes: ByteArray = ByteArray(0)
     private var psm: Int = 0
+    private val connectedGuests = CopyOnWriteArraySet<BluetoothDevice>()
 
     @Volatile
     private var running = false
@@ -86,6 +89,10 @@ class HostRadio(
         } catch (e: SecurityException) {
             Log.w(TAG, "RADIO stop advertise: ${e.message}")
         }
+        // Disconnect guests explicitly so they see the drop immediately instead
+        // of waiting out the BLE supervision timeout (rule 4: clean teardown).
+        connectedGuests.forEach { gattServer?.cancelConnection(it) }
+        connectedGuests.clear()
         try {
             gattServer?.close()
         } catch (e: SecurityException) {
@@ -194,6 +201,12 @@ class HostRadio(
                 newState: Int,
             ) {
                 Log.i(TAG, "RADIO gatt conn ${device?.address} status=$status newState=$newState")
+                if (device == null) return
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    connectedGuests.add(device)
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    connectedGuests.remove(device)
+                }
             }
 
             override fun onCharacteristicReadRequest(
