@@ -34,7 +34,7 @@ SERIALS=("$@")
 if [ "${#SERIALS[@]}" -eq 0 ]; then
   while read -r s state _; do
     [ "$state" = "device" ] && SERIALS+=("$s")
-  done < <(adb devices | tail -n +2)
+  done < <(adb devices | tr -d '\r' | tail -n +2)   # strip CR: adb.exe emits CRLF
 fi
 [ "${#SERIALS[@]}" -gt 0 ] || die "no devices — pass serials or pair the phones (README: wireless debugging)"
 [ "${#SERIALS[@]}" -ge 2 ] || log "WARNING: only ${#SERIALS[@]} device(s); the M0 gate wants both rig phones"
@@ -63,7 +63,7 @@ for S in "${SERIALS[@]}"; do
   fi
   sleep "$WAIT"
 
-  OUT=$(adb -s "$S" logcat -d -s "$TAG:I" 2>/dev/null || true)
+  OUT=$(adb -s "$S" logcat -d -s "$TAG:I" 2>/dev/null | tr -d '\r' || true)
   printf '%s\n' "$OUT" | grep -E 'STARTED|NATIVE' | sed 's/^/  | /'
 
   started=0; native=0
