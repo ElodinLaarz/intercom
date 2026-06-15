@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="true" />
+
+    <!-- M1.3 (#18): host advertise + GATT server + L2CAP listener. API 31+
+         runtime permissions, requested in MainActivity before hosting. SCAN
+         (guest, #19) is added with that issue. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
     <application
         android:label="Intercom"
         android:theme="@style/Theme.Intercom"
