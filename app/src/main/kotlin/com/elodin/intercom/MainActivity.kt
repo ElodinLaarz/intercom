@@ -42,12 +42,20 @@ class MainActivity : ComponentActivity() {
 
     private val requestHostPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-            if (grants.values.all { it }) radio.startHost() else Log.w(TAG, "host perms denied")
+            if (!grants.values.all { it }) {
+                Log.w(TAG, "host perms denied")
+                return@registerForActivityResult
+            }
+            radio.startHost()
         }
 
     private val requestGuestPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-            if (grants.values.all { it }) radio.startGuest() else Log.w(TAG, "scan perms denied")
+            if (!grants.values.all { it }) {
+                Log.w(TAG, "scan perms denied")
+                return@registerForActivityResult
+            }
+            radio.startGuest()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -79,23 +87,23 @@ class MainActivity : ComponentActivity() {
     private fun onHostButton() {
         if (radio.hosting) {
             radio.stopHost()
-        } else {
-            ensurePermissions(
-                arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT),
-                requestHostPermissions,
-            ) { radio.startHost() }
+            return
         }
+        ensurePermissions(
+            arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT),
+            requestHostPermissions,
+        ) { radio.startHost() }
     }
 
     private fun onGuestButton() {
         if (radio.guesting) {
             radio.stopGuest()
-        } else {
-            ensurePermissions(
-                arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT),
-                requestGuestPermissions,
-            ) { radio.startGuest() }
+            return
         }
+        ensurePermissions(
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT),
+            requestGuestPermissions,
+        ) { radio.startGuest() }
     }
 
     private fun ensurePermissions(
@@ -107,7 +115,11 @@ class MainActivity : ComponentActivity() {
             perms.all {
                 ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
             }
-        if (granted) onGranted() else launcher.launch(perms)
+        if (granted) {
+            onGranted()
+            return
+        }
+        launcher.launch(perms)
     }
 
     // selfTest can throw UnsatisfiedLinkError if the .so failed to load — log it

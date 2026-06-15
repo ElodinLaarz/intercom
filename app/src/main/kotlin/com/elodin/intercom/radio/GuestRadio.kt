@@ -91,9 +91,9 @@ internal class GuestRadio(
         val nextGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         if (nextGatt == null) {
             fail("GATT connect failed to start")
-        } else {
-            gatt = nextGatt
+            return
         }
+        gatt = nextGatt
     }
 
     private fun parsePsm(value: ByteArray?): Int {
@@ -107,39 +107,39 @@ internal class GuestRadio(
     ): Boolean {
         val manager = context.getSystemService(BluetoothManager::class.java)
         val ble = manager?.adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
-        var started = false
         if (ble == null) {
             Log.e(TAG, "RADIO ERROR bluetooth off or LE scan unsupported")
             onStatus("Can't scan — turn Bluetooth on")
             stop(reportStopped = false)
-        } else {
-            scanner = ble
-            // Filter on the host's minimal MSD adv ([0x01,0x01]) — not the 128-bit
-            // UUID, which the host omits from the adv PDU. Continuous + aggressive
-            // matching (landmine #2): first-match/unfiltered scans get demoted.
-            val filter = ScanFilter.Builder()
-            filter.setManufacturerData(
-                Proto.MSD_COMPANY_ID,
-                byteArrayOf(Proto.MSD_PATTERN0.toByte(), Proto.MSD_PATTERN1.toByte()),
-            )
-            val settings = ScanSettings.Builder()
-            settings.setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            settings.setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-            settings.setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-            settings.setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
-            settings.setReportDelay(0)
-            scanGeneration.incrementAndGet()
-            Log.i(TAG, "RADIO scan start (MSD filter)")
-            onStatus(statusMessage)
-            started = startScan(ble, filter, settings)
-            scanning = started
-            if (started) {
-                scheduleScanRefresh()
-            } else if (keepTrying && running && !torn) {
-                scheduleScanRetry(SCAN_STATUS, SCAN_RETRY_MS)
-            }
+            return false
         }
-        return started
+
+        scanner = ble
+        // Filter on the host's minimal MSD adv ([0x01,0x01]) — not the 128-bit
+        // UUID, which the host omits from the adv PDU. Continuous + aggressive
+        // matching (landmine #2): first-match/unfiltered scans get demoted.
+        val filter = ScanFilter.Builder()
+        filter.setManufacturerData(
+            Proto.MSD_COMPANY_ID,
+            byteArrayOf(Proto.MSD_PATTERN0.toByte(), Proto.MSD_PATTERN1.toByte()),
+        )
+        val settings = ScanSettings.Builder()
+        settings.setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+        settings.setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+        settings.setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+        settings.setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
+        settings.setReportDelay(0)
+        scanGeneration.incrementAndGet()
+        Log.i(TAG, "RADIO scan start (MSD filter)")
+        onStatus(statusMessage)
+        val started = startScan(ble, filter, settings)
+        scanning = started
+        if (started) {
+            scheduleScanRefresh()
+            return true
+        }
+        if (keepTrying && running && !torn) scheduleScanRetry(SCAN_STATUS, SCAN_RETRY_MS)
+        return false
     }
 
     private fun startScan(
@@ -271,20 +271,22 @@ internal class GuestRadio(
             ) {
                 if (torn) return
                 Log.i(TAG, "RADIO gatt conn status=$status newState=$newState")
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    val connectedGatt = g ?: return fail("GATT connected without a handle")
-                    onStatus("Connected — negotiating link…")
-                    // Central drives connection params: HIGH priority (landmine
-                    // #1) + the 517 MTU, before service discovery.
-                    if (!connectedGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)) {
-                        Log.w(TAG, "RADIO gatt requestConnectionPriority returned false")
-                    }
-                    if (!connectedGatt.requestMtu(MTU)) {
-                        Log.w(TAG, "RADIO gatt requestMtu returned false; discovering services")
-                        discoverServices(connectedGatt)
-                    }
-                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     retryScanAfterGatt("Host disconnected (status $status)")
+                    return
+                }
+                if (newState != BluetoothProfile.STATE_CONNECTED) return
+
+                val connectedGatt = g ?: return fail("GATT connected without a handle")
+                onStatus("Connected — negotiating link…")
+                // Central drives connection params: HIGH priority (landmine
+                // #1) + the 517 MTU, before service discovery.
+                if (!connectedGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)) {
+                    Log.w(TAG, "RADIO gatt requestConnectionPriority returned false")
+                }
+                if (!connectedGatt.requestMtu(MTU)) {
+                    Log.w(TAG, "RADIO gatt requestMtu returned false; discovering services")
+                    discoverServices(connectedGatt)
                 }
             }
 
@@ -309,14 +311,16 @@ internal class GuestRadio(
                 if (torn) return
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     fail("Service discovery failed (status $status)")
-                } else {
-                    val characteristic = g?.getService(serviceUuid)?.getCharacteristic(psmCharUuid)
-                    if (characteristic == null) {
-                        Log.w(TAG, "RADIO gatt PSM characteristic not found status=$status")
-                        fail("Host service/characteristic not found")
-                    } else if (!g.readCharacteristic(characteristic)) {
-                        fail("PSM read failed to start")
-                    }
+                    return
+                }
+                val characteristic = g?.getService(serviceUuid)?.getCharacteristic(psmCharUuid)
+                if (characteristic == null) {
+                    Log.w(TAG, "RADIO gatt PSM characteristic not found status=$status")
+                    fail("Host service/characteristic not found")
+                    return
+                }
+                if (!g.readCharacteristic(characteristic)) {
+                    fail("PSM read failed to start")
                 }
             }
 
@@ -352,18 +356,22 @@ internal class GuestRadio(
         value: ByteArray?,
         status: Int,
     ) {
-        if (!torn) {
-            val psm = parsePsm(value)
-            when {
-                uuid != psmCharUuid -> fail("Unexpected GATT characteristic")
-                status != BluetoothGatt.GATT_SUCCESS -> fail("PSM read failed (status $status)")
-                psm <= 0 -> fail("Invalid host PSM")
-                else -> {
-                    Log.i(TAG, "RADIO gatt read PSM=$psm status=$status")
-                    onStatus("Linked — host PSM $psm (L2CAP CoC is #20)")
-                }
-            }
+        if (torn) return
+        val psm = parsePsm(value)
+        if (uuid != psmCharUuid) {
+            fail("Unexpected GATT characteristic")
+            return
         }
+        if (status != BluetoothGatt.GATT_SUCCESS) {
+            fail("PSM read failed (status $status)")
+            return
+        }
+        if (psm <= 0) {
+            fail("Invalid host PSM")
+            return
+        }
+        Log.i(TAG, "RADIO gatt read PSM=$psm status=$status")
+        onStatus("Linked — host PSM $psm (L2CAP CoC is #20)")
     }
 
     companion object {

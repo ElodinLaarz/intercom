@@ -55,11 +55,8 @@ data class VoiceFrame(
             val reserved = bb.get().toUByte().toInt()
             val adpcm = ByteArray(Proto.VOICE_ADPCM_BYTES)
             bb.get(adpcm)
-            return if (stepIndex > Proto.VOICE_STEP_INDEX_MAX || reserved != 0) {
-                null
-            } else {
-                VoiceFrame(epoch, seq, predSample, stepIndex, adpcm)
-            }
+            if (stepIndex > Proto.VOICE_STEP_INDEX_MAX || reserved != 0) return null
+            return VoiceFrame(epoch, seq, predSample, stepIndex, adpcm)
         }
     }
 }

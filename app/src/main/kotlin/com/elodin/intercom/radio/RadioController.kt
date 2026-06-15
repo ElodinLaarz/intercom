@@ -58,9 +58,9 @@ class RadioController(
     private fun dispatch(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             block()
-        } else {
-            mainHandler.post(block)
+            return
         }
+        mainHandler.post(block)
     }
 
     private class AndroidRadioEndpointFactory(

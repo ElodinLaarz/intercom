@@ -70,28 +70,25 @@ internal class HostRadio(
         torn = false
         val manager = context.getSystemService(BluetoothManager::class.java)
         val adapter = manager?.adapter
-        var started = false
         if (adapter == null || !adapter.isEnabled) {
             Log.e(TAG, "RADIO ERROR bluetooth adapter null or disabled")
             onStatus("Bluetooth is off — enable it and retry")
-        } else {
-            running = true
-            val nextPsm = listenForL2cap(adapter)
-            if (nextPsm != null) {
-                psm = nextPsm
-                val buf = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN)
-                buf.putInt(psm)
-                psmBytes = buf.array()
-                Log.i(TAG, "RADIO l2cap listening psm=$psm")
-                onStatus("Starting host — PSM $psm")
-                started = startGattServer(manager) && startAdvertising(adapter)
-                if (!started) {
-                    onStatus("Host radio failed to start")
-                    stop(reportStopped = false)
-                }
-            }
+            return false
         }
-        return started
+
+        running = true
+        val nextPsm = listenForL2cap(adapter) ?: return false
+        psm = nextPsm
+        val buf = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN)
+        buf.putInt(psm)
+        psmBytes = buf.array()
+        Log.i(TAG, "RADIO l2cap listening psm=$psm")
+        onStatus("Starting host — PSM $psm")
+        if (startGattServer(manager) && startAdvertising(adapter)) return true
+
+        onStatus("Host radio failed to start")
+        stop(reportStopped = false)
+        return false
     }
 
     /** Tear everything down. Idempotent. */
@@ -181,19 +178,18 @@ internal class HostRadio(
             )
         val service = BluetoothGattService(serviceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         service.addCharacteristic(characteristic)
-        var started = false
         val server = manager.openGattServer(context, gattCallback)
         if (server == null) {
             Log.e(TAG, "RADIO gatt openGattServer returned null")
-        } else {
-            gattServer = server
-            if (server.addService(service)) {
-                started = true
-            } else {
-                Log.e(TAG, "RADIO gatt addService returned false")
-            }
+            return false
         }
-        return started
+
+        gattServer = server
+        if (server.addService(service)) {
+            return true
+        }
+        Log.e(TAG, "RADIO gatt addService returned false")
+        return false
     }
 
     private fun startAdvertising(adapter: BluetoothAdapter): Boolean {
@@ -272,14 +268,16 @@ internal class HostRadio(
                 if (torn) return
                 Log.i(TAG, "RADIO gatt conn ${device?.address} status=$status newState=$newState")
                 if (device == null) return
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    connectedGuests.add(device)
-                    onStatus("Guest GATT connected — waiting for PSM read")
-                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     connectedGuests.remove(device)
                     Log.i(TAG, "RADIO gatt guest disconnected ${device.address}")
                     onStatus("Advertising — PSM $psm — waiting for a guest")
+                    return
                 }
+                if (newState != BluetoothProfile.STATE_CONNECTED) return
+
+                connectedGuests.add(device)
+                onStatus("Guest GATT connected — waiting for PSM read")
             }
 
             override fun onCharacteristicReadRequest(
@@ -303,19 +301,19 @@ internal class HostRadio(
                         offset,
                         psmBytes.copyOfRange(offset, psmBytes.size),
                     )
-                } else {
-                    if (device == null) {
-                        Log.w(TAG, "RADIO gatt read psm with null device offset=$offset")
-                        return
-                    }
-                    gattServer?.sendResponse(
-                        device,
-                        requestId,
-                        BluetoothGatt.GATT_FAILURE,
-                        offset.coerceAtLeast(0),
-                        null,
-                    )
+                    return
                 }
+                if (device == null) {
+                    Log.w(TAG, "RADIO gatt read psm with null device offset=$offset")
+                    return
+                }
+                gattServer?.sendResponse(
+                    device,
+                    requestId,
+                    BluetoothGatt.GATT_FAILURE,
+                    offset.coerceAtLeast(0),
+                    null,
+                )
             }
         }
 

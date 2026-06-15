@@ -60,10 +60,11 @@ internal class RadioSessionController(
         host = radio
         if (radio.start()) {
             setDesiredRole(DesiredRadioRole.Host)
-        } else if (host === radio) {
-            host = null
-            setDesiredRole(DesiredRadioRole.Idle)
+            return
         }
+        if (host !== radio) return
+        host = null
+        setDesiredRole(DesiredRadioRole.Idle)
     }
 
     fun startGuest() {
@@ -77,10 +78,11 @@ internal class RadioSessionController(
         guest = radio
         if (radio.start()) {
             setDesiredRole(DesiredRadioRole.Guest)
-        } else if (guest === radio) {
-            guest = null
-            setDesiredRole(DesiredRadioRole.Idle)
+            return
         }
+        if (guest !== radio) return
+        guest = null
+        setDesiredRole(DesiredRadioRole.Idle)
     }
 
     fun stopHost(reportStatus: Boolean = true) {
