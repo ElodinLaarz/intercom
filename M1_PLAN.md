@@ -11,7 +11,7 @@ Companions: [V2_PLAN.md](V2_PLAN.md) §5 (M1), §4 (architecture), Appendix A
 ## 0. Goal & gate
 
 One-directional live voice, **guest → host**, over BLE. The two debug buttons
-(Host / Join — the M0 stub buttons, now wired) start each role. No real UI, no
+(Host / Guest — the M0 stub buttons, now wired) start each role. No real UI, no
 foreground service, screen on.
 
 **Gate (V2_PLAN §5):** 120 s of continuous one-way voice; `tools/smoke` T1
@@ -27,7 +27,7 @@ shared media (M6).
 
 | Module | Lang | Owns |
 |---|---|---|
-| `ui/` | Compose | Host/Join buttons → session intents. Owns nothing. |
+| `ui/` | Compose | Host/Guest buttons → session intents. Owns nothing. |
 | `session/` | Kotlin | State machine, **single owner of link state**, single-threaded dispatcher, Epoch lifecycle. (No `ForegroundService` until M3.) |
 | `radio/` | Kotlin | advertiser, scanner, GATT server/client, **the L2CAP `BluetoothSocket`**. |
 | `audio/` | C++/JNI | Oboe in/out, ADPCM enc/dec, jitter buffer, ring. DSP only — no BLE. |
@@ -115,7 +115,7 @@ nibbles = 320 samples, not 321. Decode bounds-checks `stepIndex ∈ [0,88]`,
 5. **radio: L2CAP CoC** — host listen (insecure for M1, §4.5), guest connect,
    epoch-scoped; push a test frame through; backoff ladder (#8).
 6. **session: state machine + epoch + buttons** — single-owner dispatcher; Epoch
-   lifecycle; wire the Host/Join stub buttons; connect backoff (#8).
+   lifecycle; wire the Host/Guest stub buttons; connect backoff (#8).
 7. **audio: guest capture→encode→send** — Oboe input, **comm-mode + route set
    before stream open** (#4); ADPCM encode; frame; hand bytes to radio.
 8. **audio: host receive→decode→playout** — radio → JNI; `SeqFilter` +

@@ -9,6 +9,7 @@ import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
@@ -21,6 +22,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArraySet
 import kotlin.concurrent.thread
 
 /**
@@ -41,10 +43,11 @@ import kotlin.concurrent.thread
  * marshals to the main thread.
  */
 @SuppressLint("MissingPermission")
-class HostRadio(
+internal class HostRadio(
     private val context: Context,
     private val onStatus: (String) -> Unit,
-) {
+    private val onStopped: (HostRadio) -> Unit = {},
+) : RadioEndpoint {
     private val serviceUuid: UUID = UUID.fromString(Proto.SERVICE_UUID)
     private val psmCharUuid: UUID = UUID.fromString(Proto.PSM_CHAR_UUID)
 
@@ -53,39 +56,67 @@ class HostRadio(
     private var serverSocket: BluetoothServerSocket? = null
     private var psmBytes: ByteArray = ByteArray(0)
     private var psm: Int = 0
+    private val connectedGuests = CopyOnWriteArraySet<BluetoothDevice>()
 
     @Volatile
     private var running = false
 
+    @Volatile
+    private var torn = false
+
     /** Open the L2CAP listener, publish its PSM over GATT, and start advertising. */
-    fun start() {
-        if (running) return
+    override fun start(): Boolean {
+        if (running) return true
+        torn = false
         val manager = context.getSystemService(BluetoothManager::class.java)
         val adapter = manager?.adapter
         if (adapter == null || !adapter.isEnabled) {
             Log.e(TAG, "RADIO ERROR bluetooth adapter null or disabled")
             onStatus("Bluetooth is off — enable it and retry")
-            return
+            return false
         }
+
         running = true
-        psm = openL2capListener(adapter)
+        val nextPsm = listenForL2cap(adapter) ?: return false
+        psm = nextPsm
         val buf = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN)
         buf.putInt(psm)
         psmBytes = buf.array()
         Log.i(TAG, "RADIO l2cap listening psm=$psm")
         onStatus("Starting host — PSM $psm")
-        startGattServer(manager)
-        startAdvertising(adapter)
+        if (startGattServer(manager) && startAdvertising(adapter)) return true
+
+        onStatus("Host radio failed to start")
+        stop(reportStopped = false)
+        return false
     }
 
     /** Tear everything down. Idempotent. */
-    fun stop() {
+    override fun stop() {
+        stop(reportStopped = true)
+    }
+
+    private fun stop(reportStopped: Boolean) {
+        torn = true
         running = false
         try {
             advertiser?.stopAdvertising(advertiseCallback)
         } catch (e: SecurityException) {
             Log.w(TAG, "RADIO stop advertise: ${e.message}")
         }
+        // A GATT server can't drop a *client-initiated* connection with
+        // cancelConnection alone — "adopt" it via connect() first, then cancel,
+        // so the guest sees the disconnect immediately instead of waiting out the
+        // BLE supervision timeout (rule 4: clean teardown).
+        connectedGuests.forEach { device ->
+            try {
+                gattServer?.connect(device, false)
+                gattServer?.cancelConnection(device)
+            } catch (e: SecurityException) {
+                Log.w(TAG, "RADIO cancel gatt connection: ${e.message}")
+            }
+        }
+        connectedGuests.clear()
         try {
             gattServer?.close()
         } catch (e: SecurityException) {
@@ -100,7 +131,8 @@ class HostRadio(
         gattServer = null
         serverSocket = null
         Log.i(TAG, "RADIO host stopped")
-        onStatus("Stopped")
+        if (reportStopped) onStatus("Stopped")
+        onStopped(this)
     }
 
     private fun openL2capListener(adapter: BluetoothAdapter): Int {
@@ -110,21 +142,33 @@ class HostRadio(
         return socket.psm
     }
 
+    private fun listenForL2cap(adapter: BluetoothAdapter): Int? =
+        try {
+            openL2capListener(adapter)
+        } catch (e: IOException) {
+            Log.e(TAG, "RADIO l2cap listen failed: ${e.message}")
+            onStatus("L2CAP listen failed")
+            stop(reportStopped = false)
+            null
+        }
+
     private fun acceptLoop(socket: BluetoothServerSocket) {
         try {
             while (running) {
                 val client = socket.accept()
-                Log.i(TAG, "RADIO l2cap accepted ${client.remoteDevice?.address}")
-                onStatus("Guest connected (L2CAP) — ${client.remoteDevice?.address}")
+                val address = client.remoteDevice?.address
+                Log.i(TAG, "RADIO l2cap accepted $address")
+                onStatus("L2CAP accepted from $address — closing until #20")
                 // Frame I/O is #20; this PR only proves the listener accepts.
                 client.close()
+                if (running) onStatus("Advertising — PSM $psm — waiting for a guest")
             }
         } catch (e: IOException) {
             if (running) Log.w(TAG, "RADIO l2cap accept ended: ${e.message}")
         }
     }
 
-    private fun startGattServer(manager: BluetoothManager) {
+    private fun startGattServer(manager: BluetoothManager): Boolean {
         // PERMISSION_READ is insecure — bonded/encrypted is an M3 gate item (§4.5).
         val characteristic =
             BluetoothGattCharacteristic(
@@ -135,16 +179,24 @@ class HostRadio(
         val service = BluetoothGattService(serviceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         service.addCharacteristic(characteristic)
         val server = manager.openGattServer(context, gattCallback)
+        if (server == null) {
+            Log.e(TAG, "RADIO gatt openGattServer returned null")
+            return false
+        }
+
         gattServer = server
-        server.addService(service)
+        if (server.addService(service)) {
+            return true
+        }
+        Log.e(TAG, "RADIO gatt addService returned false")
+        return false
     }
 
-    private fun startAdvertising(adapter: BluetoothAdapter) {
+    private fun startAdvertising(adapter: BluetoothAdapter): Boolean {
         val adv = adapter.bluetoothLeAdvertiser
         if (adv == null) {
             Log.e(TAG, "RADIO ERROR LE advertising unsupported")
-            onStatus("LE advertising unsupported on this device")
-            return
+            return false
         }
         advertiser = adv
         val settingsBuilder = AdvertiseSettings.Builder()
@@ -163,19 +215,38 @@ class HostRadio(
             byteArrayOf(Proto.MSD_PATTERN0.toByte(), Proto.MSD_PATTERN1.toByte()),
         )
         val data = dataBuilder.build()
-        adv.startAdvertising(settings, data, advertiseCallback)
+        return startAdvertising(adv, settings, data)
     }
+
+    private fun startAdvertising(
+        adv: BluetoothLeAdvertiser,
+        settings: AdvertiseSettings,
+        data: AdvertiseData,
+    ): Boolean =
+        try {
+            adv.startAdvertising(settings, data, advertiseCallback)
+            true
+        } catch (e: SecurityException) {
+            Log.e(TAG, "RADIO advertise permission failure: ${e.message}")
+            false
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "RADIO advertise start rejected: ${e.message}")
+            false
+        }
 
     private val advertiseCallback =
         object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+                if (torn || !running) return
                 Log.i(TAG, "RADIO advertise onStartSuccess txPower=${settingsInEffect?.txPowerLevel}")
                 onStatus("Advertising — PSM $psm — waiting for a guest")
             }
 
             override fun onStartFailure(errorCode: Int) {
+                if (torn) return
                 Log.e(TAG, "RADIO advertise onStartFailure code=$errorCode")
                 onStatus("Advertise failed (code $errorCode)")
+                stop(reportStopped = false)
             }
         }
 
@@ -185,6 +256,7 @@ class HostRadio(
                 status: Int,
                 service: BluetoothGattService?,
             ) {
+                if (torn) return
                 Log.i(TAG, "RADIO gatt serviceAdded status=$status uuid=${service?.uuid}")
             }
 
@@ -193,7 +265,19 @@ class HostRadio(
                 status: Int,
                 newState: Int,
             ) {
+                if (torn) return
                 Log.i(TAG, "RADIO gatt conn ${device?.address} status=$status newState=$newState")
+                if (device == null) return
+                if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    connectedGuests.remove(device)
+                    Log.i(TAG, "RADIO gatt guest disconnected ${device.address}")
+                    onStatus("Advertising — PSM $psm — waiting for a guest")
+                    return
+                }
+                if (newState != BluetoothProfile.STATE_CONNECTED) return
+
+                connectedGuests.add(device)
+                onStatus("Guest GATT connected — waiting for PSM read")
             }
 
             override fun onCharacteristicReadRequest(
@@ -202,10 +286,14 @@ class HostRadio(
                 offset: Int,
                 characteristic: BluetoothGattCharacteristic?,
             ) {
-                val ok = characteristic?.uuid == psmCharUuid && offset <= psmBytes.size
+                if (torn) return
+                val ok =
+                    device != null &&
+                        characteristic?.uuid == psmCharUuid &&
+                        offset in 0..psmBytes.size
                 if (ok) {
                     Log.i(TAG, "RADIO gatt read psm by ${device?.address} offset=$offset")
-                    onStatus("Guest read PSM — ${device?.address}")
+                    onStatus("Guest read PSM — waiting for L2CAP")
                     gattServer?.sendResponse(
                         device,
                         requestId,
@@ -213,9 +301,19 @@ class HostRadio(
                         offset,
                         psmBytes.copyOfRange(offset, psmBytes.size),
                     )
-                } else {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                    return
                 }
+                if (device == null) {
+                    Log.w(TAG, "RADIO gatt read psm with null device offset=$offset")
+                    return
+                }
+                gattServer?.sendResponse(
+                    device,
+                    requestId,
+                    BluetoothGatt.GATT_FAILURE,
+                    offset.coerceAtLeast(0),
+                    null,
+                )
             }
         }
 

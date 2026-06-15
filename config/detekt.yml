@@ -4,3 +4,10 @@ naming:
   FunctionNaming:
     # @Composable functions are PascalCase by convention.
     ignoreAnnotated: ['Composable']
+
+style:
+  ReturnCount:
+    # Guard clauses are the house style: keep decisions flat instead of nesting
+    # success paths under else blocks.
+    max: 6
+    excludeGuardClauses: true
