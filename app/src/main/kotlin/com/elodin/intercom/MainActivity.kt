@@ -36,6 +36,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.i(TAG, "STARTED version=${BuildConfig.VERSION_NAME}")
+        val native = try {
+            "0x%X".format(NativeCore.selfTest())
+        } catch (t: Throwable) {
+            "ERR ${t.message}"
+        }
+        Log.i(TAG, "NATIVE selfTest=$native")
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(modifier = Modifier.fillMaxSize()) {

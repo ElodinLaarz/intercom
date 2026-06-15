@@ -18,11 +18,44 @@ jobs:
           git checkout FETCH_HEAD
           git log -1 --format='checked out: %H %s'
 
-      - name: Runner environment (JDK 21 + SDK confirmed present 2026-06-12; NDK unprobed)
+      - name: Runner environment
         run: |
-          java -version 2>&1 || echo "NO JAVA on runner"
+          set -e
+          java -version 2>&1 || { echo "FATAL: no java on runner"; exit 1; }
           echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
 
-      - name: Build debug APK
+      - name: Install NDK + cmake (sdkmanager)
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SM="$(ls "$SDK"/cmdline-tools/latest/bin/sdkmanager 2>/dev/null \
+             || ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null \
+             || command -v sdkmanager || true)"
+          if [ -z "$SM" ]; then echo "FATAL: sdkmanager not found under $SDK"; exit 1; fi
+          echo "sdkmanager: $SM"
+          yes | "$SM" --licenses >/dev/null 2>&1 || true
+          "$SM" --install "ndk;27.2.12479018" "cmake;3.22.1"
+          echo "installed:"; ls "$SDK/ndk" "$SDK/cmake"
+
+      - name: Native host tests (ctest)
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          CMAKE="$(ls "$SDK"/cmake/3.22.1/bin/cmake 2>/dev/null || command -v cmake || true)"
+          if [ -z "$CMAKE" ]; then echo "FATAL: no cmake"; exit 1; fi
+          CTEST="$(dirname "$CMAKE")/ctest"  # ctest ships beside cmake, not on PATH
+          if ! command -v c++ >/dev/null 2>&1 \
+             && ! command -v g++ >/dev/null 2>&1 \
+             && ! command -v clang++ >/dev/null 2>&1; then
+            echo "no host C++ compiler — installing g++"
+            (apt-get update && apt-get install -y --no-install-recommends g++ make) \
+              || (sudo apt-get update && sudo apt-get install -y --no-install-recommends g++ make) \
+              || { echo "FATAL: no host C++ toolchain and cannot install one"; exit 1; }
+          fi
+          "$CMAKE" -S native -B native/build
+          "$CMAKE" --build native/build
+          (cd native/build && "$CTEST" --output-on-failure)
+
+      - name: Build debug APK (NDK-backed)
         run: ./gradlew --no-daemon assembleDebug
