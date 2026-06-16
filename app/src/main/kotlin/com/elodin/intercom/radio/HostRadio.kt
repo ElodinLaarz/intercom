@@ -26,6 +26,7 @@ import com.elodin.intercom.session.RadioEndpoint
 import com.elodin.intercom.session.RadioEvent
 import java.io.DataInputStream
 import java.io.IOException
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -348,6 +349,7 @@ internal class HostRadio(
         epoch: Long,
     ) {
         val output = client.outputStream
+        val pacer = TxPacer { SystemClock.elapsedRealtime() }
         var lastFrameAtMs = SystemClock.elapsedRealtime()
         try {
             while (isClientCurrent(client)) {
@@ -357,8 +359,8 @@ internal class HostRadio(
                     continue
                 }
                 lastFrameAtMs = SystemClock.elapsedRealtime()
-                output.write(frame)
-                output.flush()
+                pacer.setRouteDegraded(VoiceAudioRoute.isCommunicationRouteDegraded())
+                if (pacer.shouldSend()) writePacedFrame(output, frame, pacer, epoch)
             }
         } catch (e: IOException) {
             if (isClientCurrent(client)) {
@@ -384,6 +386,37 @@ internal class HostRadio(
 
         if (isClientCurrent(client)) emitLinkLost("Audio capture stalled")
         return null
+    }
+
+    // Time the blocking write so the pacer can read link drain pressure, then
+    // surface the paced counters. IOException propagates to the writer loop.
+    private fun writePacedFrame(
+        output: OutputStream,
+        frame: ByteArray,
+        pacer: TxPacer,
+        epoch: Long,
+    ) {
+        val startMs = SystemClock.elapsedRealtime()
+        output.write(frame)
+        output.flush()
+        pacer.onWriteComplete(SystemClock.elapsedRealtime() - startMs)
+        logTxPace(epoch, pacer)
+    }
+
+    // TX in-flight visibility (landmine #1): native qDepth measures the producer
+    // queue, not the socket FIFO that actually holds the backlog. offered-vs-sent
+    // is what the pacer sheds; intervalMs/stalls expose link drain pressure.
+    private fun logTxPace(
+        epoch: Long,
+        pacer: TxPacer,
+    ) {
+        val snap = pacer.snapshot()
+        if (snap.sent % TX_PACE_LOG_EVERY != 0L) return
+        Log.i(
+            TAG,
+            "TXPACE epoch=$epoch offered=${snap.offered} sent=${snap.sent} " +
+                "paceDropped=${snap.dropped} stalls=${snap.stalls} intervalMs=${snap.intervalMs}",
+        )
     }
 
     private fun reportAcceptedFrame(accepted: Long) {
@@ -606,6 +639,7 @@ internal class HostRadio(
         private const val HOST_LINK_PARAMS_BYTES = 2 * Integer.BYTES
         private const val EPOCH_WAIT_MS = 100L
         private const val TX_FRAME_TIMEOUT_MS = 100
+        private const val TX_PACE_LOG_EVERY = 100L
         private const val CAPTURE_STALL_RESTART_MS = 2_000L
     }
 }

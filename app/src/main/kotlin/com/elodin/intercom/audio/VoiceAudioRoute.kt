@@ -13,6 +13,7 @@ import android.util.Log
  * (landmine #4). Native owns the actual streams; this helper only applies the
  * platform communication mode/route requested by the voice path.
  */
+@Suppress("TooManyFunctions")
 internal object VoiceAudioRoute {
     private var activeUsers = 0
     private var activeAudio: AudioManager? = null
@@ -63,6 +64,17 @@ internal object VoiceAudioRoute {
         if (activeUsers == 0) return
 
         applyCommunicationRoute(audio, reason)
+    }
+
+    /**
+     * True when comm audio is on a Bluetooth route that shares the radio with the
+     * BLE voice link — classic SCO especially starves the ACL link (landmine #1's
+     * headset trigger). The send pacer widens its cadence on these routes.
+     */
+    @Synchronized
+    fun isCommunicationRouteDegraded(): Boolean {
+        val type = activeAudio?.communicationDevice?.type ?: return false
+        return type in DEGRADED_ROUTE_TYPES
     }
 
     private fun applyCommunicationRoute(
@@ -147,5 +159,15 @@ internal object VoiceAudioRoute {
             AudioDeviceInfo.TYPE_USB_DEVICE,
             AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
             AudioDeviceInfo.TYPE_BUILTIN_EARPIECE,
+        )
+
+    // BT routes that contend for the radio with the BLE voice link. Wired/USB/
+    // builtin routes don't touch the radio, so they stay at full send rate.
+    private val DEGRADED_ROUTE_TYPES =
+        setOf(
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLE_HEADSET,
+            AudioDeviceInfo.TYPE_BLE_SPEAKER,
+            AudioDeviceInfo.TYPE_HEARING_AID,
         )
 }
