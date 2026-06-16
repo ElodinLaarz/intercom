@@ -1,6 +1,7 @@
 package com.elodin.intercom
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
@@ -8,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -27,6 +29,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import com.elodin.intercom.proto.Proto
 import com.elodin.intercom.radio.RadioController
 
@@ -38,7 +42,10 @@ import com.elodin.intercom.radio.RadioController
  * M1_PLAN.md §3.
  */
 class MainActivity : ComponentActivity() {
-    private val radio by lazy { RadioController(applicationContext) }
+    private val model by viewModels<IntercomViewModel> {
+        IntercomViewModel.Factory(applicationContext)
+    }
+    private val radio: RadioController get() = model.radio
 
     private val requestHostPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
@@ -76,11 +83,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-    }
-
-    override fun onDestroy() {
-        radio.close()
-        super.onDestroy()
     }
 
     // Host and Guest toggle and are mutually exclusive (one role per phone).
@@ -138,6 +140,28 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val TAG = "INTERCOM"
+    }
+}
+
+private class IntercomViewModel(
+    context: Context,
+) : ViewModel() {
+    val radio = RadioController(context.applicationContext)
+
+    override fun onCleared() {
+        radio.close()
+    }
+
+    class Factory(
+        private val context: Context,
+    ) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            if (modelClass.isAssignableFrom(IntercomViewModel::class.java)) {
+                return IntercomViewModel(context.applicationContext) as T
+            }
+            throw IllegalArgumentException("Unknown ViewModel ${modelClass.name}")
+        }
     }
 }
 
