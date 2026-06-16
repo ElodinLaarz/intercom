@@ -501,18 +501,19 @@ internal class GuestRadio(
         epoch: Long,
     ) {
         val output = socket.outputStream
-        val pacer = TxPacer { SystemClock.elapsedRealtime() }
         var lastFrameAtMs = SystemClock.elapsedRealtime()
+        var writes = 0L
         try {
             while (isL2capCurrent(generation)) {
-                val frame = NativeCore.takeGuestFrame(TX_FRAME_TIMEOUT_MS)
-                if (frame == null) {
+                val bundleFrames = bundleFramesForRoute()
+                val bundle = NativeCore.takeGuestBundle(bundleFrames, TX_FRAME_TIMEOUT_MS)
+                if (bundle == null) {
                     lastFrameAtMs = recoverCaptureIfStalled(epoch, lastFrameAtMs) ?: return
                     continue
                 }
                 lastFrameAtMs = SystemClock.elapsedRealtime()
-                pacer.setRouteDegraded(VoiceAudioRoute.isCommunicationRouteDegraded())
-                if (pacer.shouldSend()) writePacedFrame(output, frame, pacer, epoch)
+                writes += 1
+                writeBundle(output, bundle, epoch, bundleFrames, writes)
             }
         } catch (e: IOException) {
             if (isL2capCurrent(generation)) {
@@ -539,34 +540,33 @@ internal class GuestRadio(
         return null
     }
 
-    // Time the blocking write so the pacer can read link drain pressure, then
-    // surface the paced counters. IOException propagates to the writer loop.
-    private fun writePacedFrame(
-        output: OutputStream,
-        frame: ByteArray,
-        pacer: TxPacer,
-        epoch: Long,
-    ) {
-        val startMs = SystemClock.elapsedRealtime()
-        output.write(frame)
-        output.flush()
-        pacer.onWriteComplete(SystemClock.elapsedRealtime() - startMs)
-        logTxPace(epoch, pacer)
+    // Smaller packet rate on a radio-sharing BT route (landmine #1): bundle
+    // consecutive frames into one write rather than dropping them — dropping
+    // decimates speech into silence. Native returns the freshest contiguous run,
+    // so the peer plays the bundle gap-free.
+    private fun bundleFramesForRoute(): Int {
+        if (VoiceAudioRoute.isCommunicationRouteDegraded()) return DEGRADED_BUNDLE_FRAMES
+        return 1
     }
 
-    // TX in-flight visibility (landmine #1): native qDepth measures the producer
-    // queue, not the socket FIFO that actually holds the backlog. offered-vs-sent
-    // is what the pacer sheds; intervalMs/stalls expose link drain pressure.
-    private fun logTxPace(
+    // One socket write carries a whole bundle of consecutive frames. Timing the
+    // write surfaces socket backpressure (lastWriteMs); IOException ends the link.
+    private fun writeBundle(
+        output: OutputStream,
+        bundle: ByteArray,
         epoch: Long,
-        pacer: TxPacer,
+        bundleFrames: Int,
+        writes: Long,
     ) {
-        val snap = pacer.snapshot()
-        if (snap.sent % TX_PACE_LOG_EVERY != 0L) return
+        val startMs = SystemClock.elapsedRealtime()
+        output.write(bundle)
+        output.flush()
+        val writeMs = SystemClock.elapsedRealtime() - startMs
+        if (writes % TX_LOG_EVERY_WRITES != 0L) return
         Log.i(
             TAG,
-            "TXPACE epoch=$epoch offered=${snap.offered} sent=${snap.sent} " +
-                "paceDropped=${snap.dropped} stalls=${snap.stalls} intervalMs=${snap.intervalMs}",
+            "TXBUNDLE epoch=$epoch writes=$writes bundleFrames=$bundleFrames " +
+                "bytes=${bundle.size} lastWriteMs=$writeMs",
         )
     }
 
@@ -833,7 +833,8 @@ internal class GuestRadio(
         private const val HOST_LINK_PARAMS_BYTES = 2 * Integer.BYTES
         private const val EPOCH_WAIT_MS = 100L
         private const val TX_FRAME_TIMEOUT_MS = 100
-        private const val TX_PACE_LOG_EVERY = 100L
+        private const val DEGRADED_BUNDLE_FRAMES = 2
+        private const val TX_LOG_EVERY_WRITES = 50L
         private const val CAPTURE_STALL_RESTART_MS = 2_000L
         private const val SCAN_STATUS = "Scanning for host…"
         private const val SCAN_RETRY_MS = 750L

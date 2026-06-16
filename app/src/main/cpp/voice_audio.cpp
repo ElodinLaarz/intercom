@@ -127,12 +127,11 @@ struct TxEngine::Impl {
 
   bool start();
   void stop();
-  bool takeFrame(FrameBytes& out, int timeoutMs);
+  int takeBundle(std::uint8_t* out, int maxFrames, int timeoutMs);
   std::uint32_t nextSequence() const;
   oboe::DataCallbackResult onAudioReady(void* audioData, int32_t numFrames);
 
-  bool popLatestPacket(TxPacket& packet);
-  void logPacket(const TxPacket& packet) const;
+  void logBundle(std::uint32_t firstSeq, int firstPeak, int count) const;
   void encodeSamples(const std::int16_t* samples, int32_t numFrames);
   void emitFrame();
 
@@ -247,8 +246,8 @@ void TxEngine::stop() {
   impl_->stop();
 }
 
-bool TxEngine::takeFrame(FrameBytes& out, int timeoutMs) {
-  return impl_->takeFrame(out, timeoutMs);
+int TxEngine::takeBundle(std::uint8_t* out, int maxFrames, int timeoutMs) {
+  return impl_->takeBundle(out, maxFrames, timeoutMs);
 }
 
 std::uint32_t TxEngine::epoch() const {
@@ -297,51 +296,56 @@ void TxEngine::Impl::stop() {
   stopStream(stream);
 }
 
-bool TxEngine::Impl::takeFrame(FrameBytes& out, int timeoutMs) {
+int TxEngine::Impl::takeBundle(std::uint8_t* out, int maxFrames, int timeoutMs) {
+  if (maxFrames < 1) return 0;
+
+  if (queue.depth() == 0 && !stopping.load(std::memory_order_acquire)) {
+    std::unique_lock<std::mutex> lock(waitMutex);
+    frameReady.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] {
+      return stopping.load(std::memory_order_acquire) || queue.depth() > 0;
+    });
+  }
+  if (stopping.load(std::memory_order_acquire)) return 0;
+
+  // Bound queue latency: keep only the freshest maxFrames, dropping older ones
+  // (freshest-wins). At the link's sustainable packet rate the queue sits near
+  // zero and nothing is dropped; this only sheds a genuine backlog.
+  while (queue.depth() > static_cast<std::size_t>(maxFrames)) {
+    TxPacket stale;
+    if (!queue.pop(stale)) break;
+    lateDrops.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  // Pop the freshest contiguous run, oldest-first, into one write buffer. The
+  // frames keep consecutive sequence numbers, so the peer plays them gap-free —
+  // bundling cuts the packet rate without decimating the audio.
+  int count = 0;
+  std::uint32_t firstSeq = 0;
+  int firstPeak = 0;
   TxPacket packet;
-  if (popLatestPacket(packet)) {
-    out = packet.bytes;
-    logPacket(packet);
-    return true;
+  while (count < maxFrames && queue.pop(packet)) {
+    if (count == 0) {
+      firstSeq = packet.seq;
+      firstPeak = packet.peak;
+    }
+    std::memcpy(out + static_cast<std::size_t>(count) * proto::kVoiceFrameBytes,
+                packet.bytes.data(), proto::kVoiceFrameBytes);
+    count += 1;
   }
-  if (stopping.load(std::memory_order_acquire)) return false;
-
-  std::unique_lock<std::mutex> lock(waitMutex);
-  frameReady.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] {
-    return stopping.load(std::memory_order_acquire) || queue.depth() > 0;
-  });
-  if (stopping.load(std::memory_order_acquire)) return false;
-  if (!popLatestPacket(packet)) return false;
-
-  out = packet.bytes;
-  logPacket(packet);
-  return true;
+  if (count > 0) logBundle(firstSeq, firstPeak, count);
+  return count;
 }
 
-bool TxEngine::Impl::popLatestPacket(TxPacket& packet) {
-  if (!queue.pop(packet)) return false;
-
-  std::uint64_t skipped = 0;
-  TxPacket newer;
-  while (queue.pop(newer)) {
-    packet = newer;
-    skipped += 1;
-  }
-  if (skipped > 0) {
-    lateDrops.fetch_add(skipped, std::memory_order_relaxed);
-  }
-  return true;
-}
-
-void TxEngine::Impl::logPacket(const TxPacket& packet) const {
-  if (packet.seq % kDiagEveryFrames == 0) {
-    LOGI(
-        "DIAG epoch=%u txSeq=%u txPeak=%d qDepth=%zu drops=%llu lateDrops=%llu",
-        epoch, packet.seq, packet.peak, queue.depth(),
-        static_cast<unsigned long long>(queue.dropped()),
-        static_cast<unsigned long long>(
-            lateDrops.load(std::memory_order_relaxed)));
-  }
+void TxEngine::Impl::logBundle(std::uint32_t firstSeq, int firstPeak,
+                               int count) const {
+  if (firstSeq % kDiagEveryFrames >= static_cast<std::uint32_t>(count)) return;
+  LOGI(
+      "DIAG epoch=%u txSeq=%u txPeak=%d bundle=%d qDepth=%zu drops=%llu "
+      "lateDrops=%llu",
+      epoch, firstSeq, firstPeak, count, queue.depth(),
+      static_cast<unsigned long long>(queue.dropped()),
+      static_cast<unsigned long long>(
+          lateDrops.load(std::memory_order_relaxed)));
 }
 
 oboe::DataCallbackResult TxEngine::Impl::onAudioReady(void* audioData,

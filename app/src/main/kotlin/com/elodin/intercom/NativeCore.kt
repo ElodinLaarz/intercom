@@ -15,7 +15,10 @@ object NativeCore {
 
     external fun startGuestCapture(epoch: Long): Boolean
 
-    external fun takeGuestFrame(timeoutMs: Int): ByteArray?
+    external fun takeGuestBundle(
+        maxFrames: Int,
+        timeoutMs: Int,
+    ): ByteArray?
 
     external fun stopGuestCapture()
 

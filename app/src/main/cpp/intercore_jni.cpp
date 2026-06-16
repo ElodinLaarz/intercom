@@ -17,6 +17,8 @@
 
 namespace {
 
+constexpr int kMaxBundleFrames = 4;  // safety cap on frames per socket write
+
 std::mutex g_audio_mutex;
 std::shared_ptr<intercore::audio::TxEngine> g_tx;
 std::shared_ptr<intercore::audio::RxEngine> g_rx;
@@ -94,8 +96,9 @@ Java_com_elodin_intercom_NativeCore_startGuestCapture(JNIEnv*, jobject,
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_elodin_intercom_NativeCore_takeGuestFrame(JNIEnv* env, jobject,
-                                                   jint timeoutMs) {
+Java_com_elodin_intercom_NativeCore_takeGuestBundle(JNIEnv* env, jobject,
+                                                    jint maxFrames,
+                                                    jint timeoutMs) {
   std::shared_ptr<intercore::audio::TxEngine> engine;
   {
     std::lock_guard<std::mutex> lock(g_audio_mutex);
@@ -103,14 +106,21 @@ Java_com_elodin_intercom_NativeCore_takeGuestFrame(JNIEnv* env, jobject,
   }
   if (!engine) return nullptr;
 
-  intercore::audio::FrameBytes frame{};
-  if (!engine->takeFrame(frame, timeoutMs)) return nullptr;
+  int cap = maxFrames;
+  if (cap < 1) cap = 1;
+  if (cap > kMaxBundleFrames) cap = kMaxBundleFrames;
 
-  jbyteArray out = env->NewByteArray(intercore::proto::kVoiceFrameBytes);
+  std::array<std::uint8_t,
+             kMaxBundleFrames * intercore::proto::kVoiceFrameBytes>
+      buf{};
+  const int count = engine->takeBundle(buf.data(), cap, timeoutMs);
+  if (count <= 0) return nullptr;
+
+  const jsize bytes = count * intercore::proto::kVoiceFrameBytes;
+  jbyteArray out = env->NewByteArray(bytes);
   if (out == nullptr) return nullptr;
-  env->SetByteArrayRegion(
-      out, 0, intercore::proto::kVoiceFrameBytes,
-      reinterpret_cast<const jbyte*>(frame.data()));
+  env->SetByteArrayRegion(out, 0, bytes,
+                          reinterpret_cast<const jbyte*>(buf.data()));
   return out;
 }
 

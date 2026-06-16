@@ -17,7 +17,9 @@ class TxEngine {
 
   bool start();
   void stop();
-  bool takeFrame(FrameBytes& out, int timeoutMs);
+  // Pop up to maxFrames freshest *consecutive* frames into out (count*frameBytes),
+  // dropping any older backlog first. Returns the frame count written.
+  int takeBundle(std::uint8_t* out, int maxFrames, int timeoutMs);
   std::uint32_t epoch() const;
   std::uint32_t nextSequence() const;
 
