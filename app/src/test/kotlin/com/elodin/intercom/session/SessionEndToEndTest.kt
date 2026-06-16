@@ -1,47 +1,50 @@
-package com.elodin.intercom.radio
+package com.elodin.intercom.session
 
+import com.elodin.intercom.radio.ScanStartBudget
+import com.elodin.intercom.radio.scanCooldownStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class RadioSessionEndToEndTest {
+class SessionEndToEndTest {
     @Test
-    fun guestKeepsSearchingAcrossHostRestartUntilStop() {
+    fun linkedDisconnectReturnsBothPhonesToIdleUntilUserRestarts() {
         val hostRig = RigPhone()
         val guestRig = RigPhone()
 
         hostRig.controller.startHost()
         guestRig.controller.startGuest()
-        hostRig.host.status("Advertising — PSM 177 — waiting for a guest")
-        guestRig.guest.status("Scanning for host…")
+        hostRig.host.event(RadioEvent.Advertising(psm = 177, text = "Advertising — PSM 177 — waiting for a guest"))
+        guestRig.guest.event(RadioEvent.Status("Scanning for host"))
 
-        hostRig.host.status("Guest GATT connected — waiting for PSM read")
-        hostRig.host.status("Guest read PSM — waiting for L2CAP")
-        guestRig.guest.status("Host PSM 177 — opening voice link…")
-        guestRig.guest.status("Voice link up — sent first frame")
-        hostRig.host.status("Voice link up — first frame seq=0")
+        hostRig.host.event(RadioEvent.Status("Guest read PSM - waiting for L2CAP"))
+        guestRig.guest.event(RadioEvent.Status("Host PSM 177 - opening voice link"))
+        guestRig.guest.event(RadioEvent.Linked(peer = "AA:BB:CC:DD:EE:FF", psm = 177))
+        hostRig.host.event(RadioEvent.Linked(peer = "11:22:33:44:55:66", psm = 177))
+
+        assertEquals(1L, (hostRig.controller.state as LinkState.Linked).epoch.id)
+        assertEquals(1L, (guestRig.controller.state as LinkState.Linked).epoch.id)
 
         hostRig.controller.stopHost()
-        guestRig.guest.status("Host disconnected — rescanning…")
+        guestRig.guest.event(RadioEvent.LinkLost("Host disconnected"))
 
-        assertEquals(DesiredRadioRole.Idle, hostRig.controller.state.desiredRole)
-        assertTrue(guestRig.controller.state.guesting)
-        assertEquals("Host disconnected — rescanning…", guestRig.controller.state.status)
+        assertTrue(hostRig.controller.state is LinkState.Idle)
+        assertTrue(guestRig.controller.state is LinkState.Idle)
 
         hostRig.controller.startHost()
-        hostRig.host.status("Advertising — PSM 199 — waiting for a guest")
-        guestRig.guest.status("Found host AA:BB:CC:DD:EE:FF — connecting…")
-        guestRig.guest.status("Host PSM 199 — opening voice link…")
-        guestRig.guest.status("Voice link up — sent first frame")
-        hostRig.host.status("Voice link up — first frame seq=0")
+        guestRig.controller.startGuest()
+        hostRig.host.event(RadioEvent.Advertising(psm = 199, text = "Advertising — PSM 199 — waiting for a guest"))
+        guestRig.guest.event(
+            RadioEvent.Found(
+                peer = "AA:BB:CC:DD:EE:FF",
+                text = "Found host AA:BB:CC:DD:EE:FF — connecting…",
+            ),
+        )
+        guestRig.guest.event(RadioEvent.Linked(peer = "AA:BB:CC:DD:EE:FF", psm = 199))
+        hostRig.host.event(RadioEvent.Linked(peer = "11:22:33:44:55:66", psm = 199))
 
-        assertTrue(hostRig.controller.state.hosting)
-        assertTrue(guestRig.controller.state.guesting)
-
-        guestRig.controller.stopGuest()
-
-        assertEquals(DesiredRadioRole.Idle, guestRig.controller.state.desiredRole)
-        assertEquals("Stopped", guestRig.controller.state.status)
+        assertEquals(2L, (hostRig.controller.state as LinkState.Linked).epoch.id)
+        assertEquals(2L, (guestRig.controller.state as LinkState.Linked).epoch.id)
     }
 
     @Test
@@ -88,10 +91,9 @@ class RadioSessionEndToEndTest {
     private class RigPhone {
         val factory = FakeRadioEndpointFactory()
         val controller =
-            RadioSessionController(
+            SessionController(
                 factory = factory,
-                dispatch = { block -> block() },
-                onState = {},
+                dispatcher = InlineSessionDispatcher(),
             )
 
         val host: FakeRadioEndpoint get() = factory.hosts.last()
@@ -108,10 +110,9 @@ class RadioSessionEndToEndTest {
                 scanRequests = scanRequests,
             )
         val controller =
-            RadioSessionController(
+            SessionController(
                 factory = factory,
-                dispatch = { block -> block() },
-                onState = {},
+                dispatcher = InlineSessionDispatcher(),
             )
 
         fun click(button: Button) {
@@ -155,20 +156,14 @@ class RadioSessionEndToEndTest {
                 nowMs = { scheduler.nowMs },
             )
 
-        override fun host(
-            onStatus: (String) -> Unit,
-            onStopped: (RadioEndpoint) -> Unit,
-        ): RadioEndpoint = PassiveRadioEndpoint()
+        override fun host(onEvent: (RadioEvent) -> Unit): RadioEndpoint = PassiveRadioEndpoint()
 
-        override fun guest(
-            onStatus: (String) -> Unit,
-            onStopped: (RadioEndpoint) -> Unit,
-        ): RadioEndpoint =
+        override fun guest(onEvent: (RadioEvent) -> Unit): RadioEndpoint =
             DebouncedGuestEndpoint(
                 scheduler = scheduler,
                 scanBudget = scanBudget,
                 scanRequests = scanRequests,
-                onStatus = onStatus,
+                onEvent = onEvent,
             )
     }
 
@@ -182,7 +177,7 @@ class RadioSessionEndToEndTest {
         private val scheduler: FakeScheduler,
         private val scanBudget: ScanStartBudget,
         private val scanRequests: MutableList<Long>,
-        private val onStatus: (String) -> Unit,
+        private val onEvent: (RadioEvent) -> Unit,
     ) : RadioEndpoint {
         private var running = false
         private var generation = 0
@@ -206,12 +201,12 @@ class RadioSessionEndToEndTest {
             }
             scanBudget.recordStart()
             scanRequests += scheduler.nowMs
-            onStatus("Scanning for host…")
+            onEvent(RadioEvent.Status("Scanning for host"))
         }
 
         private fun scheduleScanStart(delayMs: Long) {
             val scheduledGeneration = generation
-            onStatus(scanCooldownStatus(delayMs))
+            onEvent(RadioEvent.Status(scanCooldownStatus(delayMs)))
             scheduler.postDelayed(delayMs) {
                 if (running && scheduledGeneration == generation) attemptScanStart()
             }

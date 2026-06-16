@@ -20,6 +20,8 @@ import android.content.Context
 import android.util.Log
 import com.elodin.intercom.proto.Proto
 import com.elodin.intercom.proto.VoiceFrame
+import com.elodin.intercom.session.RadioEndpoint
+import com.elodin.intercom.session.RadioEvent
 import java.io.DataInputStream
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -41,16 +43,15 @@ import kotlin.concurrent.thread
  * caller guarantees BLUETOOTH_ADVERTISE + BLUETOOTH_CONNECT are granted, so the
  * BLE calls are annotated [SuppressLint].
  *
- * [onStatus] receives short human-readable status lines for the debug UI; it may
- * be invoked from any thread (advertise/GATT/accept callbacks), so the caller
- * marshals to the main thread.
+ * [onEvent] receives lifecycle facts and short human-readable status lines; it
+ * may be invoked from any thread (advertise/GATT/accept callbacks), so the
+ * caller marshals to the session dispatcher.
  */
 @SuppressLint("MissingPermission")
 @Suppress("TooManyFunctions")
 internal class HostRadio(
     private val context: Context,
-    private val onStatus: (String) -> Unit,
-    private val onStopped: (HostRadio) -> Unit = {},
+    private val onEvent: (RadioEvent) -> Unit,
 ) : RadioEndpoint {
     private val serviceUuid: UUID = UUID.fromString(Proto.SERVICE_UUID)
     private val psmCharUuid: UUID = UUID.fromString(Proto.PSM_CHAR_UUID)
@@ -80,7 +81,7 @@ internal class HostRadio(
         val adapter = manager?.adapter
         if (adapter == null || !adapter.isEnabled) {
             Log.e(TAG, "RADIO ERROR bluetooth adapter null or disabled")
-            onStatus("Bluetooth is off — enable it and retry")
+            emitFailed("Bluetooth is off — enable it and retry")
             return false
         }
 
@@ -91,10 +92,10 @@ internal class HostRadio(
         buf.putInt(psm)
         psmBytes = buf.array()
         Log.i(TAG, "RADIO l2cap listening psm=$psm")
-        onStatus("Starting host — PSM $psm")
+        emitStatus("Starting host — PSM $psm")
         if (startGattServer(manager) && startAdvertising(adapter)) return true
 
-        onStatus("Host radio failed to start")
+        emitFailed("Host radio failed to start")
         stop(reportStopped = false)
         return false
     }
@@ -144,8 +145,7 @@ internal class HostRadio(
         clientSocket = null
         serverSocket = null
         Log.i(TAG, "RADIO host stopped")
-        if (reportStopped) onStatus("Stopped")
-        onStopped(this)
+        if (reportStopped) emitStatus("Stopped")
     }
 
     private fun openL2capListener(adapter: BluetoothAdapter): Int {
@@ -160,7 +160,7 @@ internal class HostRadio(
             openL2capListener(adapter)
         } catch (e: IOException) {
             Log.e(TAG, "RADIO l2cap listen failed: ${e.message}")
-            onStatus("L2CAP listen failed")
+            emitFailed("L2CAP listen failed")
             stop(reportStopped = false)
             null
         }
@@ -180,18 +180,21 @@ internal class HostRadio(
             closeSocket(client, "l2cap stale client")
             return
         }
-        val address = client.remoteDevice?.address
+        val address = client.remoteDevice?.address ?: UNKNOWN_PEER
         Log.i(TAG, "RADIO l2cap accepted $address")
-        onStatus("Voice link up — receiving from $address")
-        readFrames(client)
+        emitStatus("Voice link up — receiving from $address")
+        readFrames(client, address)
         detachClientSocket(client)
-        if (running && !torn) onStatus("Advertising — PSM $psm — waiting for a guest")
+        if (running && !torn) emitLinkLost("Guest disconnected")
     }
 
     // Drain frames until the guest drops or we tear down. #20 proves the wire
     // format crosses L2CAP — decode + bounds-check (landmine #12); epoch/seq
     // gating + the jitter buffer are the host receive path (#23).
-    private fun readFrames(client: BluetoothSocket) {
+    private fun readFrames(
+        client: BluetoothSocket,
+        peer: String,
+    ) {
         val input = DataInputStream(client.inputStream)
         val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
         var received = 0L
@@ -200,7 +203,7 @@ internal class HostRadio(
                 input.readFully(buf)
                 if (!running || torn) return
                 received += 1
-                reportFrame(buf, received)
+                reportFrame(buf, received, peer)
             }
         } catch (e: IOException) {
             if (running && !torn) Log.w(TAG, "RADIO l2cap rx ended: ${e.message}")
@@ -210,6 +213,7 @@ internal class HostRadio(
     private fun reportFrame(
         buf: ByteArray,
         received: Long,
+        peer: String,
     ) {
         val frame = VoiceFrame.decode(buf)
         if (frame == null) {
@@ -219,7 +223,8 @@ internal class HostRadio(
         if (!running || torn) return
         if (received > 1L) return
         Log.i(TAG, "RADIO l2cap rx frame epoch=${frame.epoch} seq=${frame.seq} (first)")
-        onStatus("Voice link up — first frame seq=${frame.seq}")
+        emitLinked(peer)
+        emitStatus("Voice link up — first frame seq=${frame.seq}")
     }
 
     private fun publishClientSocket(client: BluetoothSocket): Boolean =
@@ -328,13 +333,13 @@ internal class HostRadio(
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                 if (torn || !running) return
                 Log.i(TAG, "RADIO advertise onStartSuccess txPower=${settingsInEffect?.txPowerLevel}")
-                onStatus("Advertising — PSM $psm — waiting for a guest")
+                emitAdvertising("Advertising — PSM $psm — waiting for a guest")
             }
 
             override fun onStartFailure(errorCode: Int) {
                 if (torn) return
                 Log.e(TAG, "RADIO advertise onStartFailure code=$errorCode")
-                onStatus("Advertise failed (code $errorCode)")
+                emitFailed("Advertise failed (code $errorCode)")
                 stop(reportStopped = false)
             }
         }
@@ -360,13 +365,13 @@ internal class HostRadio(
                 if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     connectedGuests.remove(device)
                     Log.i(TAG, "RADIO gatt guest disconnected ${device.address}")
-                    onStatus("Advertising — PSM $psm — waiting for a guest")
+                    emitAdvertising("Advertising — PSM $psm — waiting for a guest")
                     return
                 }
                 if (newState != BluetoothProfile.STATE_CONNECTED) return
 
                 connectedGuests.add(device)
-                onStatus("Guest GATT connected — waiting for PSM read")
+                emitStatus("Guest GATT connected — waiting for PSM read")
             }
 
             override fun onCharacteristicReadRequest(
@@ -382,7 +387,7 @@ internal class HostRadio(
                         offset in 0..psmBytes.size
                 if (ok) {
                     Log.i(TAG, "RADIO gatt read psm by ${device?.address} offset=$offset")
-                    onStatus("Guest read PSM — waiting for L2CAP")
+                    emitStatus("Guest read PSM — waiting for L2CAP")
                     gattServer?.sendResponse(
                         device,
                         requestId,
@@ -406,7 +411,28 @@ internal class HostRadio(
             }
         }
 
+    private fun emitLinked(peer: String) {
+        onEvent(RadioEvent.Linked(peer = peer, psm = psm))
+    }
+
+    private fun emitAdvertising(text: String) {
+        onEvent(RadioEvent.Advertising(psm = psm, text = text))
+    }
+
+    private fun emitLinkLost(reason: String) {
+        onEvent(RadioEvent.LinkLost(reason))
+    }
+
+    private fun emitFailed(reason: String) {
+        onEvent(RadioEvent.Failed(reason))
+    }
+
+    private fun emitStatus(text: String) {
+        onEvent(RadioEvent.Status(text))
+    }
+
     companion object {
         private const val TAG = "INTERCOM"
+        private const val UNKNOWN_PEER = "unknown"
     }
 }

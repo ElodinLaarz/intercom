@@ -3,26 +3,32 @@ package com.elodin.intercom.radio
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.elodin.intercom.session.LinkState
+import com.elodin.intercom.session.RadioEndpoint
+import com.elodin.intercom.session.RadioEndpointFactory
+import com.elodin.intercom.session.RadioEvent
+import com.elodin.intercom.session.SessionController
 
 /**
- * Android/Compose adapter for the M1 radio debug screen. The pure desired-role
- * state lives in [RadioSessionController]; this class only builds Android radio
- * endpoints and marshals callback state updates onto the main looper.
+ * Android/Compose adapter for the M1 radio debug screen. The link state lives in
+ * [SessionController]; this class only builds Android radio endpoints and
+ * marshals rendered state updates onto the main looper.
  */
 class RadioController(
     context: Context,
 ) {
     private val session =
-        RadioSessionController(
+        SessionController(
             factory = AndroidRadioEndpointFactory(context),
-            dispatch = ::dispatch,
             onState = ::render,
+            logger = { line -> Log.i(TAG, line) },
         )
 
-    var status by mutableStateOf(session.state.status)
+    var status by mutableStateOf(session.state.detail)
         private set
     var hosting by mutableStateOf(session.state.hosting)
         private set
@@ -49,10 +55,16 @@ class RadioController(
         session.stopAll()
     }
 
-    private fun render(state: RadioSessionState) {
-        status = state.status
-        hosting = state.hosting
-        guesting = state.guesting
+    fun close() {
+        session.close()
+    }
+
+    private fun render(state: LinkState) {
+        dispatch {
+            status = state.detail
+            hosting = state.hosting
+            guesting = state.guesting
+        }
     }
 
     private fun dispatch(block: () -> Unit) {
@@ -66,28 +78,21 @@ class RadioController(
     private class AndroidRadioEndpointFactory(
         private val context: Context,
     ) : RadioEndpointFactory {
-        override fun host(
-            onStatus: (String) -> Unit,
-            onStopped: (RadioEndpoint) -> Unit,
-        ): RadioEndpoint =
+        override fun host(onEvent: (RadioEvent) -> Unit): RadioEndpoint =
             HostRadio(
                 context = context,
-                onStatus = onStatus,
-                onStopped = { stopped -> onStopped(stopped) },
+                onEvent = onEvent,
             )
 
-        override fun guest(
-            onStatus: (String) -> Unit,
-            onStopped: (RadioEndpoint) -> Unit,
-        ): RadioEndpoint =
+        override fun guest(onEvent: (RadioEvent) -> Unit): RadioEndpoint =
             GuestRadio(
                 context = context,
-                onStatus = onStatus,
-                onStopped = { stopped -> onStopped(stopped) },
+                onEvent = onEvent,
             )
     }
 
     companion object {
+        private const val TAG = "INTERCOM"
         private val mainHandler = Handler(Looper.getMainLooper())
     }
 }

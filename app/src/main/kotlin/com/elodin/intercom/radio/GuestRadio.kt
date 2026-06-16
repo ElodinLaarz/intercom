@@ -20,6 +20,8 @@ import android.os.SystemClock
 import android.util.Log
 import com.elodin.intercom.proto.Proto
 import com.elodin.intercom.proto.VoiceFrame
+import com.elodin.intercom.session.RadioEndpoint
+import com.elodin.intercom.session.RadioEvent
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -36,15 +38,14 @@ import kotlin.concurrent.thread
  *
  * Single owner of the guest radio objects; torn down in [stop] — no reset()
  * (rule 4). The caller guarantees BLUETOOTH_SCAN + BLUETOOTH_CONNECT are granted,
- * so the BLE calls are annotated [SuppressLint]. [onStatus] may fire from any
- * thread (scan/GATT callbacks).
+ * so the BLE calls are annotated [SuppressLint]. [onEvent] may fire from any
+ * thread (scan/GATT/L2CAP callbacks).
  */
 @SuppressLint("MissingPermission")
 @Suppress("TooManyFunctions")
 internal class GuestRadio(
     private val context: Context,
-    private val onStatus: (String) -> Unit,
-    private val onStopped: (GuestRadio) -> Unit = {},
+    private val onEvent: (RadioEvent) -> Unit,
 ) : RadioEndpoint {
     private val serviceUuid: UUID = UUID.fromString(Proto.SERVICE_UUID)
     private val psmCharUuid: UUID = UUID.fromString(Proto.PSM_CHAR_UUID)
@@ -95,8 +96,7 @@ internal class GuestRadio(
         closeGatt(disconnect = true)
         scanner = null
         Log.i(TAG, "RADIO guest stopped")
-        if (reportStopped) onStatus("Stopped")
-        onStopped(this)
+        if (reportStopped) emitStatus("Stopped")
     }
 
     private fun connectToHost(device: BluetoothDevice) {
@@ -122,7 +122,7 @@ internal class GuestRadio(
         val ble = manager?.adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
         if (ble == null) {
             Log.e(TAG, "RADIO ERROR bluetooth off or LE scan unsupported")
-            onStatus("Can't scan — turn Bluetooth on")
+            emitFailed("Can't scan — turn Bluetooth on")
             stop(reportStopped = false)
             return false
         }
@@ -150,7 +150,7 @@ internal class GuestRadio(
         settings.setReportDelay(0)
         scanGeneration.incrementAndGet()
         Log.i(TAG, "RADIO scan start (MSD filter)")
-        onStatus(statusMessage)
+        emitStatus(statusMessage)
         val started = startScan(ble, filter, settings)
         scanning = started
         if (started) {
@@ -172,30 +172,20 @@ internal class GuestRadio(
             true
         } catch (e: SecurityException) {
             Log.e(TAG, "RADIO scan start permission failure: ${e.message}")
-            onStatus("Scan failed to start")
+            emitFailed("Scan failed to start")
             stop(reportStopped = false)
             false
         } catch (e: IllegalArgumentException) {
             Log.e(TAG, "RADIO scan start rejected: ${e.message}")
-            onStatus("Scan failed to start")
+            emitFailed("Scan failed to start")
             false
         }
 
     private fun fail(message: String) {
         if (torn) return
         Log.e(TAG, "RADIO ERROR $message")
-        onStatus(message)
+        emitFailed(message)
         stop(reportStopped = false)
-    }
-
-    private fun retryScanAfterGatt(message: String) {
-        if (torn) return
-        Log.w(TAG, "RADIO $message")
-        closeL2cap()
-        closeGatt(disconnect = false)
-        if (running) {
-            scheduleScanRetry(RECONNECT_STATUS, GATT_RESCAN_DELAY_MS)
-        }
     }
 
     private fun scheduleScanRetry(
@@ -203,7 +193,7 @@ internal class GuestRadio(
         delayMs: Long,
     ) {
         val generation = prepareScanRetry()
-        onStatus(statusMessage)
+        emitStatus(statusMessage)
         postScanRetry(generation, delayMs, statusMessage)
     }
 
@@ -242,7 +232,7 @@ internal class GuestRadio(
     ) {
         if (!running || torn || generation != scanGeneration.get()) return
         val remainingMs = (retryAtMs - SystemClock.elapsedRealtime()).coerceAtLeast(0)
-        onStatus(scanCooldownStatus(remainingMs))
+        emitStatus(scanCooldownStatus(remainingMs))
         if (remainingMs == 0L) return
         mainHandler.postDelayed(
             { updateCooldownStatus(generation, retryAtMs) },
@@ -348,7 +338,7 @@ internal class GuestRadio(
             socket = device.createInsecureL2capChannel(psm)
             if (publishSocketIfCurrent(generation, socket)) {
                 socket.connect()
-                if (sendFirstFrameIfCurrent(generation, socket)) {
+                if (sendFirstFrameIfCurrent(generation, socket, device, psm)) {
                     connectedSocket = socket
                 }
             }
@@ -368,6 +358,8 @@ internal class GuestRadio(
     private fun sendFirstFrameIfCurrent(
         generation: Int,
         socket: BluetoothSocket,
+        device: BluetoothDevice,
+        psm: Int,
     ): Boolean {
         if (!isL2capCurrent(generation)) return false
         val frame =
@@ -382,7 +374,8 @@ internal class GuestRadio(
         socket.outputStream.flush()
         if (!isL2capCurrent(generation)) return false
         Log.i(TAG, "RADIO l2cap tx frame epoch=${frame.epoch} seq=${frame.seq}")
-        onStatus("Voice link up — sent first frame")
+        emitLinked(device.address, psm)
+        emitStatus("Voice link up — sent first frame")
         return true
     }
 
@@ -407,12 +400,7 @@ internal class GuestRadio(
         }
         if (!isL2capCurrent(generation)) return
         Log.w(TAG, "RADIO l2cap host closed — link lost")
-        mainHandler.post { onHostGone(generation) }
-    }
-
-    private fun onHostGone(generation: Int) {
-        if (!isL2capCurrent(generation)) return
-        retryScanAfterGatt("Host disconnected")
+        emitLinkLost("Host disconnected")
     }
 
     private fun sleepLadder(delayMs: Long): Boolean {
@@ -476,7 +464,7 @@ internal class GuestRadio(
                 scanning = false // got our host — stop scanning and connect
                 scanGeneration.incrementAndGet()
                 Log.i(TAG, "RADIO scan match ${device.address}")
-                onStatus("Found host ${device.address} — connecting…")
+                emitFound(device.address, "Found host ${device.address} — connecting…")
                 stopCurrentScan()
                 connectToHost(device)
             }
@@ -502,13 +490,13 @@ internal class GuestRadio(
                 if (torn) return
                 Log.i(TAG, "RADIO gatt conn status=$status newState=$newState")
                 if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    retryScanAfterGatt("Host disconnected (status $status)")
+                    fail("Host disconnected (status $status)")
                     return
                 }
                 if (newState != BluetoothProfile.STATE_CONNECTED) return
 
                 val connectedGatt = g ?: return fail("GATT connected without a handle")
-                onStatus("Connected — negotiating link…")
+                emitStatus("Connected — negotiating link…")
                 // Central drives connection params: HIGH priority (landmine
                 // #1) + the 517 MTU, before service discovery.
                 if (!connectedGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)) {
@@ -575,7 +563,7 @@ internal class GuestRadio(
         }
 
     private fun discoverServices(gatt: BluetoothGatt) {
-        onStatus("Discovering services…")
+        emitStatus("Discovering services…")
         if (!gatt.discoverServices()) {
             fail("Service discovery failed to start")
         }
@@ -601,20 +589,44 @@ internal class GuestRadio(
             return
         }
         Log.i(TAG, "RADIO gatt read PSM=$psm status=$status")
-        onStatus("Host PSM $psm — opening voice link…")
+        emitStatus("Host PSM $psm — opening voice link…")
         openL2cap(psm)
+    }
+
+    private fun emitLinked(
+        peer: String,
+        psm: Int,
+    ) {
+        onEvent(RadioEvent.Linked(peer = peer, psm = psm))
+    }
+
+    private fun emitFound(
+        peer: String,
+        text: String,
+    ) {
+        onEvent(RadioEvent.Found(peer = peer, text = text))
+    }
+
+    private fun emitLinkLost(reason: String) {
+        onEvent(RadioEvent.LinkLost(reason))
+    }
+
+    private fun emitFailed(reason: String) {
+        onEvent(RadioEvent.Failed(reason))
+    }
+
+    private fun emitStatus(text: String) {
+        onEvent(RadioEvent.Status(text))
     }
 
     companion object {
         private const val TAG = "INTERCOM"
         private const val MTU = 517
 
-        // Placeholder epoch until the session machine (#21) owns the monotonic
-        // connection epoch; the host logs it but does not gate on it yet (#23).
+        // Placeholder wire epoch until #23 threads the session epoch into the
+        // voice frame header; the host logs it but does not gate on it yet.
         private const val L2CAP_TEST_EPOCH = 1
         private const val SCAN_STATUS = "Scanning for host…"
-        private const val RECONNECT_STATUS = "Host disconnected — rescanning…"
-        private const val GATT_RESCAN_DELAY_MS = 350L
         private const val SCAN_RETRY_MS = 750L
         private const val SCAN_REFRESH_MS = 10_000L
         private const val SCAN_REFRESH_RESTART_MS = 150L

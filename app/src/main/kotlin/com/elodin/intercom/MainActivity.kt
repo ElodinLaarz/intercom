@@ -79,7 +79,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        radio.stopAll()
+        radio.close()
         super.onDestroy()
     }
 
