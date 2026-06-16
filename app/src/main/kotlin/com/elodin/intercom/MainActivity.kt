@@ -92,7 +92,11 @@ class MainActivity : ComponentActivity() {
             return
         }
         ensurePermissions(
-            arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT),
+            arrayOf(
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.RECORD_AUDIO,
+            ),
             requestHostPermissions,
         ) { radio.startHost() }
     }
