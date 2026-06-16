@@ -220,3 +220,4 @@ Every item cost real debugging time in v1. Apply at the milestone noted; treat d
 | 12 | Unbounded wire-field decodes (lengths, counts, floats) | Bounds-check every field at decode; property/bounds tests per message type from the start | ~dozens of June clamp PRs | M1+ |
 | 13 | Motorola BLE advertising payload overflow | Keep advertising payload minimal; moto is the canary device | #381 | M1 |
 | 14 | CI that doesn't check out the PR head validates nothing | CI echoes head sha; merge gate requires the `pull_request`-context run | Forgejo #59 | M0 |
+| 15 | An open L2CAP CoC keeps the shared ACL alive, so a peer that only writes its socket never sees a GATT/ACL disconnect when the other side leaves | Each end reads its CoC and treats EOF/close as link loss; don't rely on GATT `DISCONNECTED` once a CoC is open | v2 #20 (M1.5), rig 06-15 | M1 |
