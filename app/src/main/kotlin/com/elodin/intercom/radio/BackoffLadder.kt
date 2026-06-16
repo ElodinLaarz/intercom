@@ -20,6 +20,13 @@ internal class BackoffLadder(
     /** Wait before 0-based [retryIndex]; null when no rungs remain (give up). */
     fun delayBeforeRetryMs(retryIndex: Int): Long? = rungsMs.getOrNull(retryIndex)
 
+    /** Wait before 0-based [retryIndex], holding at the last rung after exhaustion. */
+    fun cappedDelayBeforeRetryMs(retryIndex: Int): Long {
+        if (rungsMs.isEmpty()) return 0L
+        if (retryIndex < 0) return rungsMs.first()
+        return rungsMs.getOrElse(retryIndex) { rungsMs.last() }
+    }
+
     companion object {
         private val DEFAULT_RUNGS_MS = longArrayOf(150L, 300L, 600L, 1_000L, 1_500L)
     }

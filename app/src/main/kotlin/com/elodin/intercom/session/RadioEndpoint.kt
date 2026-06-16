@@ -5,6 +5,8 @@ internal interface RadioEndpoint {
 
     fun beginEpoch(epochId: Long) = Unit
 
+    fun endEpoch() = Unit
+
     fun stop()
 }
 

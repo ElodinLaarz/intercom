@@ -26,6 +26,15 @@ class BackoffLadderTest {
     }
 
     @Test
+    fun cappedDelayHoldsAtLastRung() {
+        val ladder = BackoffLadder(longArrayOf(10L, 20L))
+
+        assertEquals(10L, ladder.cappedDelayBeforeRetryMs(0))
+        assertEquals(20L, ladder.cappedDelayBeforeRetryMs(1))
+        assertEquals(20L, ladder.cappedDelayBeforeRetryMs(2))
+    }
+
+    @Test
     fun copiesCustomRungs() {
         val rungs = longArrayOf(10L, 20L)
         val ladder = BackoffLadder(rungs)

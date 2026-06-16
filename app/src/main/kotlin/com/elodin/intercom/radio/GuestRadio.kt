@@ -45,7 +45,7 @@ import kotlin.concurrent.thread
  * thread (scan/GATT/L2CAP callbacks).
  */
 @SuppressLint("MissingPermission")
-@Suppress("TooManyFunctions")
+@Suppress("LargeClass", "TooManyFunctions")
 internal class GuestRadio(
     private val context: Context,
     private val onEvent: (RadioEvent) -> Unit,
@@ -58,6 +58,13 @@ internal class GuestRadio(
     private var scanner: BluetoothLeScanner? = null
     private var gatt: BluetoothGatt? = null
     private var hostDevice: BluetoothDevice? = null
+    private val reconnectLock = Any()
+    private val reconnectBackoff = BackoffLadder()
+    private var reconnecting = false
+    private var reconnectCycle = 0
+    private var reconnectTimer = 0
+    private var reconnectAttempt = 0
+    private var cachedHostFailures = 0
 
     @Volatile
     private var clientSocket: BluetoothSocket? = null
@@ -84,6 +91,7 @@ internal class GuestRadio(
     override fun start(): Boolean {
         if (running) return true
         torn = false
+        resetReconnectState()
         running = true
         val started = beginScan("Scanning for host…")
         if (!started) running = false
@@ -101,31 +109,47 @@ internal class GuestRadio(
             if (started && running && !torn) linkedEpoch = epochId
             epochLock.notifyAll()
         }
-        if (!started) fail("Audio start failed")
+        if (!started) {
+            startOrContinueReconnect(
+                reason = "Audio start failed",
+                notifySession = true,
+                forceScan = false,
+            )
+        }
+    }
+
+    override fun endEpoch() {
+        if (!running || torn) return
+        stopAudio()
+        closeL2cap(clearHostDevice = false)
+        if (!isReconnecting()) closeGatt(disconnect = true)
     }
 
     private fun stop(reportStopped: Boolean) {
         torn = true
         running = false
         scanning = false
+        resetReconnectState()
         scanGeneration.incrementAndGet()
         stopAudio()
         stopCurrentScan()
-        closeL2cap()
+        closeL2cap(clearHostDevice = true)
         closeGatt(disconnect = true)
         scanner = null
         Log.i(TAG, "RADIO guest stopped")
         if (reportStopped) emitStatus("Stopped")
     }
 
-    private fun connectToHost(device: BluetoothDevice) {
+    private fun connectToHost(device: BluetoothDevice): Boolean {
+        if (!running || torn) return false
         hostDevice = device
         val nextGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         if (nextGatt == null) {
-            fail("GATT connect failed to start")
-            return
+            Log.w(TAG, "RADIO gatt connect failed to start ${device.address}")
+            return false
         }
         gatt = nextGatt
+        return true
     }
 
     private data class HostLinkParams(
@@ -221,6 +245,177 @@ internal class GuestRadio(
         emitFailed(message)
         stop(reportStopped = false)
     }
+
+    private fun recoverSetupFailure(
+        message: String,
+        forceScan: Boolean = false,
+    ) {
+        if (!running || torn) return
+        Log.w(TAG, "RADIO setup recovery: $message")
+        startOrContinueReconnect(
+            reason = message,
+            notifySession = hasLinkedEpoch(),
+            forceScan = forceScan || cachedHostFailuresReached,
+        )
+    }
+
+    private fun startOrContinueReconnect(
+        reason: String,
+        notifySession: Boolean,
+        forceScan: Boolean,
+    ) {
+        if (!running || torn) return
+        val first: Boolean
+        val cycle: Int
+        synchronized(reconnectLock) {
+            first = !reconnecting
+            if (first) {
+                reconnecting = true
+                reconnectAttempt = 0
+                cachedHostFailures = 0
+                reconnectCycle += 1
+            }
+            cycle = reconnectCycle
+        }
+
+        closeLinkForReconnect()
+        if (first && notifySession) emitLinkLost(reason)
+        if (first) scheduleReconnectDeadline(cycle)
+        scheduleReconnectAttempt(cycle, reason, forceScan)
+    }
+
+    private fun closeLinkForReconnect() {
+        scanning = false
+        scanGeneration.incrementAndGet()
+        stopCurrentScan()
+        stopAudio()
+        closeL2cap(clearHostDevice = false)
+        closeGatt(disconnect = true)
+    }
+
+    private fun scheduleReconnectDeadline(cycle: Int) {
+        mainHandler.postDelayed(
+            {
+                if (isReconnectCycleCurrent(cycle)) {
+                    giveUpReconnect("Reconnect timed out")
+                }
+            },
+            RECONNECT_TIMEOUT_MS,
+        )
+    }
+
+    private fun scheduleReconnectAttempt(
+        cycle: Int,
+        reason: String,
+        forceScan: Boolean,
+    ) {
+        val timer: Int
+        val attempt: Int
+        if (!running || torn) return
+        synchronized(reconnectLock) {
+            if (!isReconnectCycleCurrentLocked(cycle)) return
+            attempt = reconnectAttempt
+            reconnectAttempt += 1
+            reconnectTimer += 1
+            timer = reconnectTimer
+        }
+        val delayMs = reconnectBackoff.cappedDelayBeforeRetryMs(attempt)
+        emitStatus("Reconnecting in ${delayMs}ms — $reason")
+        mainHandler.postDelayed(
+            { runReconnectAttempt(cycle, timer, forceScan) },
+            delayMs,
+        )
+    }
+
+    private fun runReconnectAttempt(
+        cycle: Int,
+        timer: Int,
+        forceScan: Boolean,
+    ) {
+        if (!isReconnectTimerCurrent(cycle, timer)) return
+        val cachedDevice = hostDevice
+        val useCached = !forceScan && cachedDevice != null && !cachedHostFailuresReached
+        if (useCached) {
+            val failureCount = recordCachedHostAttempt()
+            emitFound(
+                cachedDevice.address,
+                "Reconnecting to host ${cachedDevice.address} ($failureCount/$CACHED_RETRIES_BEFORE_SCAN)…",
+            )
+            closeGatt(disconnect = false)
+            if (connectToHost(cachedDevice)) return
+            scheduleReconnectAttempt(
+                cycle = cycle,
+                reason = "GATT connect failed to start",
+                forceScan = cachedHostFailuresReached,
+            )
+            return
+        }
+
+        beginReconnectScan(cycle)
+    }
+
+    private fun beginReconnectScan(cycle: Int) {
+        if (!isReconnectCycleCurrent(cycle)) return
+        beginScan("Reconnecting — scanning for host…", keepTrying = true)
+    }
+
+    private fun giveUpReconnect(reason: String) {
+        synchronized(reconnectLock) {
+            if (!reconnecting) return
+            reconnecting = false
+            reconnectCycle += 1
+            reconnectTimer += 1
+        }
+        fail("Rejoin required — $reason")
+    }
+
+    private fun resetReconnectState() {
+        synchronized(reconnectLock) {
+            reconnecting = false
+            reconnectCycle += 1
+            reconnectTimer += 1
+            reconnectAttempt = 0
+            cachedHostFailures = 0
+        }
+    }
+
+    private fun isReconnectCycleCurrent(cycle: Int): Boolean =
+        running &&
+            !torn &&
+            synchronized(reconnectLock) {
+                reconnecting && reconnectCycle == cycle
+            }
+
+    private fun isReconnectTimerCurrent(
+        cycle: Int,
+        timer: Int,
+    ): Boolean =
+        running &&
+            !torn &&
+            synchronized(reconnectLock) {
+                reconnecting && reconnectCycle == cycle && reconnectTimer == timer
+            }
+
+    private fun isReconnecting(): Boolean = synchronized(reconnectLock) { reconnecting }
+
+    private val cachedHostFailuresReached: Boolean
+        get() =
+            synchronized(reconnectLock) {
+                cachedHostFailures >= CACHED_RETRIES_BEFORE_SCAN
+            }
+
+    private fun isReconnectCycleCurrentLocked(cycle: Int): Boolean = reconnecting && reconnectCycle == cycle
+
+    private fun recordCachedHostAttempt(): Int =
+        synchronized(reconnectLock) {
+            cachedHostFailures += 1
+            cachedHostFailures
+        }
+
+    private fun hasLinkedEpoch(): Boolean =
+        synchronized(epochLock) {
+            linkedEpoch != null
+        }
 
     private fun scheduleScanRetry(
         statusMessage: String,
@@ -422,7 +617,7 @@ internal class GuestRadio(
     private fun openL2cap(params: HostLinkParams) {
         val device = hostDevice
         if (device == null) {
-            fail("No host device for L2CAP")
+            recoverSetupFailure("No host device for L2CAP", forceScan = true)
             return
         }
         val generation =
@@ -434,8 +629,8 @@ internal class GuestRadio(
     }
 
     // Open the CoC to the host's PSM and run duplex voice over one fixed-frame
-    // byte stream. Retries on the bounded backoff ladder (landmine #8) only for
-    // pre-link failures; once linked, a disconnect returns the session idle.
+    // byte stream. Pre-link failures walk the bounded ladder, then feed the M2
+    // reconnect cycle instead of stopping the selected guest role.
     private fun connectLoop(
         generation: Int,
         device: BluetoothDevice,
@@ -449,7 +644,7 @@ internal class GuestRadio(
             if (!sleepLadder(delayMs)) return
             attempt += 1
         }
-        if (isL2capCurrent(generation)) fail("L2CAP connect failed")
+        if (isL2capCurrent(generation)) recoverSetupFailure("L2CAP connect failed")
     }
 
     private fun openAndStream(
@@ -488,10 +683,11 @@ internal class GuestRadio(
         emitLinked(device.address, params)
         val epoch = awaitLinkedEpoch(generation) ?: return
         if (!isL2capCurrent(generation)) return
+        resetReconnectState()
 
         Log.i(TAG, "RADIO l2cap duplex audio epoch=$epoch")
         emitStatus("Voice link up — duplex audio")
-        thread(isDaemon = true, name = "l2cap-rx") { readRemoteFrames(generation, socket) }
+        thread(isDaemon = true, name = "l2cap-rx") { readRemoteFrames(generation, socket, epoch) }
         writeCaptureFrames(generation, socket, epoch)
     }
 
@@ -514,11 +710,24 @@ internal class GuestRadio(
                 lastFrameAtMs = SystemClock.elapsedRealtime()
                 val writeMs = writeBundle(output, bundle)
                 txMeter.onSample(bundleFrames, bundle.size, writeMs)?.let { Log.i(TAG, "TXNET epoch=$epoch $it") }
+                if (RadioLinkHealth.shouldReconnectAfterWrite(writeMs)) {
+                    Log.w(TAG, "RADIO l2cap tx stalled ${writeMs}ms epoch=$epoch")
+                    startOrContinueReconnect(
+                        reason = "L2CAP write stalled ${writeMs}ms",
+                        notifySession = true,
+                        forceScan = false,
+                    )
+                    return
+                }
             }
         } catch (e: IOException) {
             if (isL2capCurrent(generation)) {
                 Log.w(TAG, "RADIO l2cap tx ended: ${e.message}")
-                emitLinkLost("Host disconnected")
+                startOrContinueReconnect(
+                    reason = "Host disconnected",
+                    notifySession = true,
+                    forceScan = false,
+                )
             }
         } finally {
             stopCapture()
@@ -536,7 +745,11 @@ internal class GuestRadio(
         Log.w(TAG, "AUDIO capture starved — restarting epoch=$epoch")
         if (restartCapture(epoch)) return SystemClock.elapsedRealtime()
 
-        emitLinkLost("Audio capture stalled")
+        startOrContinueReconnect(
+            reason = "Audio capture stalled",
+            notifySession = true,
+            forceScan = false,
+        )
         return null
     }
 
@@ -567,10 +780,12 @@ internal class GuestRadio(
     private fun readRemoteFrames(
         generation: Int,
         socket: BluetoothSocket,
+        epoch: Long,
     ) {
         val input = DataInputStream(socket.inputStream)
         val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
         val rxMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
+        val rxHealth = RxDeliveryHealth { SystemClock.elapsedRealtime() }
         var received = 0L
         var accepted = 0L
         try {
@@ -581,6 +796,19 @@ internal class GuestRadio(
                 if (!isL2capCurrent(generation)) return
                 received += 1
                 rxMeter.onSample(1, buf.size, readMs)?.let { Log.i(TAG, "RXNET $it") }
+                rxHealth.onFrame()?.let {
+                    Log.w(
+                        TAG,
+                        "RADIO l2cap rx starved epoch=$epoch frames=${it.frames} " +
+                            "windowMs=${it.elapsedMs} windows=${it.starvedWindows}",
+                    )
+                    startOrContinueReconnect(
+                        reason = "L2CAP rx starved",
+                        notifySession = true,
+                        forceScan = false,
+                    )
+                    return
+                }
                 if (NativeCore.pushHostFrame(buf)) {
                     accepted += 1
                     reportAcceptedFrame(accepted)
@@ -595,7 +823,11 @@ internal class GuestRadio(
         }
         if (!isL2capCurrent(generation)) return
         Log.w(TAG, "RADIO l2cap host closed — link lost")
-        emitLinkLost("Host disconnected")
+        startOrContinueReconnect(
+            reason = "Host disconnected",
+            notifySession = true,
+            forceScan = false,
+        )
     }
 
     private fun reportAcceptedFrame(accepted: Long) {
@@ -615,13 +847,13 @@ internal class GuestRadio(
         return running && !torn
     }
 
-    private fun closeL2cap() {
+    private fun closeL2cap(clearHostDevice: Boolean) {
         val socket =
             synchronized(l2capLock) {
                 l2capGeneration.incrementAndGet()
                 val closingSocket = clientSocket
                 clientSocket = null
-                hostDevice = null
+                if (clearHostDevice) hostDevice = null
                 closingSocket
             }
         closeSocket(socket)
@@ -668,7 +900,8 @@ internal class GuestRadio(
                 Log.i(TAG, "RADIO scan match ${device.address}")
                 emitFound(device.address, "Found host ${device.address} — connecting…")
                 stopCurrentScan()
-                connectToHost(device)
+                if (connectToHost(device)) return
+                recoverSetupFailure("GATT connect failed to start", forceScan = true)
             }
 
             override fun onScanFailed(errorCode: Int) {
@@ -692,12 +925,20 @@ internal class GuestRadio(
                 if (torn) return
                 Log.i(TAG, "RADIO gatt conn status=$status newState=$newState")
                 if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    fail("Host disconnected (status $status)")
+                    val currentGatt = gatt
+                    if (g != null && currentGatt != null && currentGatt !== g) return
+                    if (g != null && currentGatt == null && isReconnecting()) return
+                    startOrContinueReconnect(
+                        reason = "Host disconnected (status $status)",
+                        notifySession = hasLinkedEpoch(),
+                        forceScan = cachedHostFailuresReached,
+                    )
                     return
                 }
                 if (newState != BluetoothProfile.STATE_CONNECTED) return
 
-                val connectedGatt = g ?: return fail("GATT connected without a handle")
+                val connectedGatt = g ?: return recoverSetupFailure("GATT connected without a handle")
+                if (gatt !== connectedGatt) return
                 emitStatus("Connected — negotiating link…")
                 // Central drives connection params: HIGH priority (landmine
                 // #1) + the 517 MTU, before service discovery. HIGH is not
@@ -720,7 +961,8 @@ internal class GuestRadio(
             ) {
                 if (torn) return
                 Log.i(TAG, "RADIO gatt mtu=$mtu status=$status")
-                val connectedGatt = g ?: return fail("MTU changed without a GATT handle")
+                val connectedGatt = g ?: return recoverSetupFailure("MTU changed without a GATT handle")
+                if (gatt !== connectedGatt) return
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     Log.w(TAG, "RADIO gatt mtu request failed status=$status; discovering services")
                 }
@@ -733,17 +975,17 @@ internal class GuestRadio(
             ) {
                 if (torn) return
                 if (status != BluetoothGatt.GATT_SUCCESS) {
-                    fail("Service discovery failed (status $status)")
+                    recoverSetupFailure("Service discovery failed (status $status)")
                     return
                 }
                 val characteristic = g?.getService(serviceUuid)?.getCharacteristic(psmCharUuid)
                 if (characteristic == null) {
                     Log.w(TAG, "RADIO gatt PSM characteristic not found status=$status")
-                    fail("Host service/characteristic not found")
+                    recoverSetupFailure("Host service/characteristic not found", forceScan = true)
                     return
                 }
                 if (!g.readCharacteristic(characteristic)) {
-                    fail("PSM read failed to start")
+                    recoverSetupFailure("PSM read failed to start")
                 }
             }
 
@@ -770,7 +1012,7 @@ internal class GuestRadio(
     private fun discoverServices(gatt: BluetoothGatt) {
         emitStatus("Discovering services…")
         if (!gatt.discoverServices()) {
-            fail("Service discovery failed to start")
+            recoverSetupFailure("Service discovery failed to start")
         }
     }
 
@@ -798,15 +1040,15 @@ internal class GuestRadio(
         if (torn) return
         val params = parseHostLinkParams(value)
         if (uuid != psmCharUuid) {
-            fail("Unexpected GATT characteristic")
+            recoverSetupFailure("Unexpected GATT characteristic", forceScan = true)
             return
         }
         if (status != BluetoothGatt.GATT_SUCCESS) {
-            fail("PSM read failed (status $status)")
+            recoverSetupFailure("PSM read failed (status $status)")
             return
         }
         if (params == null) {
-            fail("Invalid host PSM")
+            recoverSetupFailure("Invalid host PSM", forceScan = true)
             return
         }
         Log.i(TAG, "RADIO gatt read PSM=${params.psm} wireEpoch=${params.wireEpoch} status=$status")
@@ -860,6 +1102,8 @@ internal class GuestRadio(
         private const val COOLDOWN_STATUS_TICK_MS = 100L
         private const val SCAN_START_WINDOW_MS = 30_000L
         private const val MAX_SCAN_STARTS_PER_WINDOW = 4
+        private const val CACHED_RETRIES_BEFORE_SCAN = 2
+        private const val RECONNECT_TIMEOUT_MS = 30_000L
         private const val SCAN_FAILED_SCANNING_TOO_FREQUENTLY = 6
         private val scanStartBudget =
             ScanStartBudget(

@@ -11,6 +11,6 @@ internal class Epoch(
         if (closed) return
 
         closed = true
-        endpoint.stop()
+        endpoint.endEpoch()
     }
 }

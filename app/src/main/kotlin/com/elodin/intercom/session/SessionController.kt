@@ -89,7 +89,7 @@ internal class SessionController(
             is RadioEvent.Advertising -> onAdvertising(event)
             is RadioEvent.Found -> onFound(event)
             is RadioEvent.Linked -> onLinked(event)
-            is RadioEvent.LinkLost -> tearDownToIdle("Link lost - ${event.reason}")
+            is RadioEvent.LinkLost -> onLinkLost(event)
             is RadioEvent.Failed -> tearDownToIdle(event.reason)
             is RadioEvent.Status -> onStatus(event.text)
         }
@@ -133,6 +133,18 @@ internal class SessionController(
         endpoint.endpoint.beginEpoch(wireEpoch)
     }
 
+    private fun onLinkLost(event: RadioEvent.LinkLost) {
+        val endpoint = activeEndpoint ?: return
+        val epoch = activeEpoch ?: return
+        val psm = currentPsm()
+        activeEpoch = null
+        logger(
+            "SESSION link lost epoch=${epoch.id} role=${endpoint.role.label()} reason=${event.reason}",
+        )
+        epoch.close()
+        setState(reconnectingState(endpoint.role, psm, event.reason))
+    }
+
     private fun onStatus(text: String) {
         val endpoint = activeEndpoint ?: return
         val next =
@@ -157,11 +169,8 @@ internal class SessionController(
         val epoch = activeEpoch
         activeEpoch = null
         invalidateEvents()
-        if (epoch != null) {
-            epoch.close()
-        } else {
-            endpoint.endpoint.stop()
-        }
+        epoch?.close()
+        endpoint.endpoint.stop()
         if (reportStopped) setState(LinkState.Idle("Stopped"))
     }
 
@@ -171,13 +180,27 @@ internal class SessionController(
         val epoch = activeEpoch
         activeEpoch = null
         invalidateEvents()
-        if (epoch != null) {
-            epoch.close()
-        } else {
-            endpoint.endpoint.stop()
-        }
+        epoch?.close()
+        endpoint.endpoint.stop()
         setState(LinkState.Idle(detail))
     }
+
+    private fun currentPsm(): Int? =
+        when (val current = state) {
+            is LinkState.Hosting -> current.psm
+            is LinkState.Linked -> current.psm
+            else -> null
+        }
+
+    private fun reconnectingState(
+        role: LinkRole,
+        psm: Int?,
+        reason: String,
+    ): LinkState =
+        when (role) {
+            LinkRole.Host -> LinkState.Hosting(psm = psm, detail = "Re-arming after $reason")
+            LinkRole.Guest -> LinkState.Scanning(detail = "Reconnecting after $reason")
+        }
 
     private fun nextEventToken(): Long {
         eventToken += 1

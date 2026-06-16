@@ -97,11 +97,7 @@ internal class HostRadio(
         running = true
         val nextPsm = listenForL2cap(adapter) ?: return false
         psm = nextPsm
-        wireEpoch = nextWireEpoch()
-        val buf = ByteBuffer.allocate(HOST_LINK_PARAMS_BYTES).order(ByteOrder.LITTLE_ENDIAN)
-        buf.putInt(psm)
-        buf.putInt(wireEpoch.toInt())
-        psmBytes = buf.array()
+        publishNextWireEpoch()
         Log.i(TAG, "RADIO l2cap listening psm=$psm wireEpoch=$wireEpoch")
         emitStatus("Starting host — PSM $psm")
         if (startGattServer(manager) && startAdvertising(adapter)) return true
@@ -123,7 +119,12 @@ internal class HostRadio(
             if (started && running && !torn) linkedEpoch = epochId
             epochLock.notifyAll()
         }
-        if (!started) emitFailed("Audio start failed")
+        if (!started) handleCurrentLinkLost("Audio start failed")
+    }
+
+    override fun endEpoch() {
+        if (!running || torn) return
+        stopAudio()
     }
 
     private fun stop(reportStopped: Boolean) {
@@ -175,6 +176,14 @@ internal class HostRadio(
         val epoch = SystemClock.elapsedRealtimeNanos() and MAX_WIRE_EPOCH
         if (epoch != 0L) return epoch
         return psm.toLong() and MAX_WIRE_EPOCH
+    }
+
+    private fun publishNextWireEpoch() {
+        wireEpoch = nextWireEpoch()
+        val buf = ByteBuffer.allocate(HOST_LINK_PARAMS_BYTES).order(ByteOrder.LITTLE_ENDIAN)
+        buf.putInt(psm)
+        buf.putInt(wireEpoch.toInt())
+        psmBytes = buf.array()
     }
 
     private fun startAudio(epochId: Long): Boolean {
@@ -315,17 +324,20 @@ internal class HostRadio(
         Log.i(TAG, "RADIO l2cap rx audio epoch=$epoch peer=$address")
         emitStatus("Voice link up — duplex audio with $address")
         thread(isDaemon = true, name = "l2cap-tx") { writeCaptureFrames(client, epoch) }
-        readRemoteFrames(client)
-        detachClientSocket(client)
-        if (running && !torn) emitLinkLost("Guest disconnected")
+        readRemoteFrames(client, epoch)
+        handleClientLost(client, "Guest disconnected")
     }
 
     // Drain frames until the guest drops or we tear down. Native owns decode,
     // epoch/SeqFilter gating, jitter buffering, and Oboe output (#23).
-    private fun readRemoteFrames(client: BluetoothSocket) {
+    private fun readRemoteFrames(
+        client: BluetoothSocket,
+        epoch: Long,
+    ) {
         val input = DataInputStream(client.inputStream)
         val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
         val rxMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
+        val rxHealth = RxDeliveryHealth { SystemClock.elapsedRealtime() }
         var received = 0L
         var accepted = 0L
         try {
@@ -336,6 +348,15 @@ internal class HostRadio(
                 if (!isClientCurrent(client)) return
                 received += 1
                 rxMeter.onSample(1, buf.size, readMs)?.let { Log.i(TAG, "RXNET $it") }
+                rxHealth.onFrame()?.let {
+                    Log.w(
+                        TAG,
+                        "RADIO l2cap rx starved epoch=$epoch frames=${it.frames} " +
+                            "windowMs=${it.elapsedMs} windows=${it.starvedWindows}",
+                    )
+                    handleClientLost(client, "L2CAP rx starved")
+                    return
+                }
                 if (NativeCore.pushHostFrame(buf)) {
                     accepted += 1
                     reportAcceptedFrame(accepted)
@@ -366,15 +387,19 @@ internal class HostRadio(
                 lastFrameAtMs = SystemClock.elapsedRealtime()
                 val writeMs = writeBundle(output, bundle)
                 txMeter.onSample(bundleFrames, bundle.size, writeMs)?.let { Log.i(TAG, "TXNET epoch=$epoch $it") }
+                if (RadioLinkHealth.shouldReconnectAfterWrite(writeMs)) {
+                    Log.w(TAG, "RADIO l2cap tx stalled ${writeMs}ms epoch=$epoch")
+                    handleClientLost(client, "L2CAP write stalled ${writeMs}ms")
+                    return
+                }
             }
         } catch (e: IOException) {
             if (isClientCurrent(client)) {
                 Log.w(TAG, "RADIO l2cap tx ended: ${e.message}")
-                emitLinkLost("Guest disconnected")
+                handleClientLost(client, "Guest disconnected")
             }
         } finally {
             stopCapture()
-            detachClientSocket(client)
         }
     }
 
@@ -431,7 +456,7 @@ internal class HostRadio(
             true
         }
 
-    private fun closeClientSocket() {
+    private fun closeClientSocket(): Boolean {
         val socket =
             synchronized(l2capLock) {
                 val closingSocket = clientSocket
@@ -439,13 +464,46 @@ internal class HostRadio(
                 closingSocket
             }
         closeSocket(socket, "l2cap client")
+        return socket != null
     }
 
-    private fun detachClientSocket(client: BluetoothSocket) {
+    private fun detachClientSocket(client: BluetoothSocket): Boolean {
+        var detached = false
         synchronized(l2capLock) {
-            if (clientSocket === client) clientSocket = null
+            if (clientSocket === client) {
+                clientSocket = null
+                detached = true
+            }
         }
         closeSocket(client, "l2cap client")
+        return detached
+    }
+
+    private fun handleCurrentLinkLost(reason: String) {
+        val client = clientSocket
+        if (client != null) {
+            handleClientLost(client, reason)
+            return
+        }
+        stopAudio()
+        rearmAfterLinkLoss(reason)
+    }
+
+    private fun handleClientLost(
+        client: BluetoothSocket,
+        reason: String,
+    ) {
+        if (!detachClientSocket(client)) return
+        stopAudio()
+        rearmAfterLinkLoss(reason)
+    }
+
+    private fun rearmAfterLinkLoss(reason: String) {
+        if (!running || torn) return
+        publishNextWireEpoch()
+        Log.i(TAG, "RADIO host re-armed psm=$psm wireEpoch=$wireEpoch after $reason")
+        emitLinkLost(reason)
+        emitAdvertising("Advertising — PSM $psm — waiting for a guest")
     }
 
     private fun closeSocket(

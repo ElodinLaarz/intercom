@@ -7,6 +7,7 @@ import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.elodin.intercom.IntercomForegroundService
 import com.elodin.intercom.session.LinkState
 import com.elodin.intercom.session.RadioEndpoint
 import com.elodin.intercom.session.RadioEndpointFactory
@@ -21,9 +22,10 @@ import com.elodin.intercom.session.SessionController
 class RadioController(
     context: Context,
 ) {
+    private val context = context.applicationContext
     private val session =
         SessionController(
-            factory = AndroidRadioEndpointFactory(context),
+            factory = AndroidRadioEndpointFactory(this.context),
             onState = ::render,
             logger = { line -> Log.i(TAG, line) },
         )
@@ -36,10 +38,12 @@ class RadioController(
         private set
 
     fun startHost() {
+        IntercomForegroundService.start(context)
         session.startHost()
     }
 
     fun startGuest() {
+        IntercomForegroundService.start(context)
         session.startGuest()
     }
 
@@ -57,6 +61,7 @@ class RadioController(
 
     fun close() {
         session.close()
+        IntercomForegroundService.stop(context)
     }
 
     private fun render(state: LinkState) {
@@ -64,6 +69,7 @@ class RadioController(
             status = state.detail
             hosting = state.hosting
             guesting = state.guesting
+            if (state is LinkState.Idle) IntercomForegroundService.stop(context)
         }
     }
 

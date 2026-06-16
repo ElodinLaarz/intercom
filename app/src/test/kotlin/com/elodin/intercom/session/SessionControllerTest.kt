@@ -33,9 +33,10 @@ class SessionControllerTest {
         host.event(RadioEvent.LinkLost("Guest disconnected"))
         host.event(RadioEvent.LinkLost("Guest disconnected again"))
 
-        assertEquals(1, host.stopCount)
-        assertTrue(fixture.controller.state is LinkState.Idle)
-        assertEquals("Link lost - Guest disconnected", fixture.controller.state.detail)
+        assertEquals(1, host.endEpochCount)
+        assertEquals(0, host.stopCount)
+        assertTrue(fixture.controller.state is LinkState.Hosting)
+        assertEquals("Re-arming after Guest disconnected", fixture.controller.state.detail)
     }
 
     @Test
@@ -131,7 +132,10 @@ class SessionControllerTest {
         assertEquals(listOf(1L), fixture.guest.begunEpochs)
 
         fixture.guest.event(RadioEvent.LinkLost("Host disconnected"))
-        assertTrue(fixture.controller.state is LinkState.Idle)
+        assertEquals(1, fixture.guest.endEpochCount)
+        assertEquals(0, fixture.guest.stopCount)
+        assertTrue(fixture.controller.state is LinkState.Scanning)
+        assertEquals("Reconnecting after Host disconnected", fixture.controller.state.detail)
     }
 
     private class Fixture {
@@ -173,6 +177,8 @@ internal class FakeRadioEndpoint(
         private set
     var stopCount = 0
         private set
+    var endEpochCount = 0
+        private set
     var startResult = true
     val begunEpochs = mutableListOf<Long>()
 
@@ -183,6 +189,10 @@ internal class FakeRadioEndpoint(
 
     override fun beginEpoch(epochId: Long) {
         begunEpochs += epochId
+    }
+
+    override fun endEpoch() {
+        endEpochCount += 1
     }
 
     override fun stop() {

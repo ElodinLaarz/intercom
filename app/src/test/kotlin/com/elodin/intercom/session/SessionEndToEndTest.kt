@@ -8,7 +8,7 @@ import org.junit.Test
 
 class SessionEndToEndTest {
     @Test
-    fun linkedDisconnectReturnsBothPhonesToIdleUntilUserRestarts() {
+    fun linkedDisconnectKeepsGuestReconnectingUntilHostReturns() {
         val hostRig = RigPhone()
         val guestRig = RigPhone()
 
@@ -29,10 +29,9 @@ class SessionEndToEndTest {
         guestRig.guest.event(RadioEvent.LinkLost("Host disconnected"))
 
         assertTrue(hostRig.controller.state is LinkState.Idle)
-        assertTrue(guestRig.controller.state is LinkState.Idle)
+        assertTrue(guestRig.controller.state is LinkState.Scanning)
 
         hostRig.controller.startHost()
-        guestRig.controller.startGuest()
         hostRig.host.event(RadioEvent.Advertising(psm = 199, text = "Advertising — PSM 199 — waiting for a guest"))
         guestRig.guest.event(
             RadioEvent.Found(
