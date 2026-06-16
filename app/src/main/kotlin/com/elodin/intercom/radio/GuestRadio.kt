@@ -700,10 +700,13 @@ internal class GuestRadio(
                 val connectedGatt = g ?: return fail("GATT connected without a handle")
                 emitStatus("Connected — negotiating link…")
                 // Central drives connection params: HIGH priority (landmine
-                // #1) + the 517 MTU, before service discovery.
+                // #1) + the 517 MTU, before service discovery. HIGH is not
+                // sticky — Android reverts the interval to BALANCED after the
+                // initial burst — so re-assert it on a timer for the link's life.
                 if (!connectedGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)) {
                     Log.w(TAG, "RADIO gatt requestConnectionPriority returned false")
                 }
+                scheduleConnPriorityRefresh(connectedGatt)
                 if (!connectedGatt.requestMtu(MTU)) {
                     Log.w(TAG, "RADIO gatt requestMtu returned false; discovering services")
                     discoverServices(connectedGatt)
@@ -771,6 +774,22 @@ internal class GuestRadio(
         }
     }
 
+    // Re-assert HIGH connection priority on a timer (landmine #1): the request is
+    // not sticky — Android relaxes the interval back toward BALANCED after the
+    // initial transfer, which on the rig coincides with voice goodput collapsing
+    // a few seconds in. Self-stops when torn down or superseded by a new gatt.
+    private fun scheduleConnPriorityRefresh(g: BluetoothGatt) {
+        mainHandler.postDelayed(
+            {
+                if (torn || !running || gatt !== g) return@postDelayed
+                val ok = g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                Log.i(TAG, "RADIO reassert CONNECTION_PRIORITY_HIGH ok=$ok")
+                scheduleConnPriorityRefresh(g)
+            },
+            CONN_PRIORITY_REFRESH_MS,
+        )
+    }
+
     private fun handlePsmRead(
         uuid: UUID?,
         value: ByteArray?,
@@ -824,6 +843,7 @@ internal class GuestRadio(
     companion object {
         private const val TAG = "INTERCOM"
         private const val MTU = 517
+        private const val CONN_PRIORITY_REFRESH_MS = 4_000L
 
         private const val MAX_WIRE_EPOCH = 0xFFFF_FFFFL
         private const val HOST_LINK_PARAMS_BYTES = 2 * Integer.BYTES
