@@ -631,7 +631,7 @@ internal class HostRadio(
     companion object {
         private const val TAG = "INTERCOM"
         private const val UNKNOWN_PEER = "unknown"
-        private const val MAX_WIRE_EPOCH = 0xFFFF_FFFFL
+        private const val MAX_WIRE_EPOCH = 4_294_967_295L // 2^32 - 1: max u32 wire epoch
         private const val HOST_LINK_PARAMS_BYTES = 2 * Integer.BYTES
         private const val EPOCH_WAIT_MS = 100L
         private const val TX_FRAME_TIMEOUT_MS = 100
