@@ -126,6 +126,7 @@ internal class SessionController(
                 detail = detail,
             ),
         )
+        endpoint.endpoint.beginEpoch(epoch.id)
     }
 
     private fun onStatus(text: String) {

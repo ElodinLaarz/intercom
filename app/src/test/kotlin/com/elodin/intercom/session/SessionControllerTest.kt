@@ -71,6 +71,7 @@ class SessionControllerTest {
         val linked = fixture.controller.state as LinkState.Linked
         assertEquals(LinkRole.Host, linked.role)
         assertEquals(177, linked.psm)
+        assertEquals(listOf(1L), fixture.host.begunEpochs)
 
         fixture.controller.stopHost()
         assertTrue(fixture.controller.state is LinkState.Idle)
@@ -110,6 +111,7 @@ class SessionControllerTest {
         val linked = fixture.controller.state as LinkState.Linked
         assertEquals(LinkRole.Guest, linked.role)
         assertEquals(199, linked.psm)
+        assertEquals(listOf(1L), fixture.guest.begunEpochs)
 
         fixture.guest.event(RadioEvent.LinkLost("Host disconnected"))
         assertTrue(fixture.controller.state is LinkState.Idle)
@@ -155,10 +157,15 @@ internal class FakeRadioEndpoint(
     var stopCount = 0
         private set
     var startResult = true
+    val begunEpochs = mutableListOf<Long>()
 
     override fun start(): Boolean {
         startCount += 1
         return startResult
+    }
+
+    override fun beginEpoch(epochId: Long) {
+        begunEpochs += epochId
     }
 
     override fun stop() {

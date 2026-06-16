@@ -12,10 +12,11 @@ Update at every milestone gate and any on-device session.
 | Native core (ring/seq) | 2026-06-14 | CI host (Ubuntu) | host `ctest` 2/2: `RingBuffer` drop-oldest + overwrite count, `SeqFilter` epoch gate + 2^32-wrap. On-device `NativeCore.selfTest`=0xC0DE verified at the M0 phone gate |
 | Smoke harness | 2026-06-14 | Pixel 10 Pro XL + moto g play 2024 | `tools/smoke` PASS on both (the M0 gate). Caught + fixed a CRLF parse bug on the Windows host |
 | Radio (BLE link) | 2026-06-15 | Pixel 10 Pro XL (guest) + moto g play 2024 (host) | M1.5 (#20): **first L2CAP CoC voice frame.** moto host PSM 229; Pixel guest scanned, read PSM 229, opened CoC, sent `VoiceFrame(epoch=1, seq=0)`; host accepted and decoded first frame; host Stop closed CoC and guest detected host loss/rescan. |
-| Voice pipeline | — | — | M1, not started |
+| Voice pipeline | — | — | #22/#23 implementation is local-build validated only; awaiting scripted two-phone T1 / rig validation before this row can pass |
 
 ## Log
 
+- 2026-06-16 — **M1.7/M1.8 (#22/#23) implementation prepared for rig test; not hardware-validated yet.** Guest path now opens Oboe input after `MODE_IN_COMMUNICATION` + communication-device routing, ADPCM-encodes self-contained frames in native, and streams frame bytes over the Kotlin-owned L2CAP socket with the session-owned epoch. Host path now starts Oboe output with Shared / VoiceCommunication / Speech / PerformanceMode None, pushes radio bytes into native SeqFilter + jitter buffer + ADPCM decode, and plays out via Oboe. Local validation only: ktlint, detekt, `testDebugUnitTest`, and `assembleDebug` all passed on the Windows workspace.
 - 2026-06-12 — repo created; skeleton scaffolded (Compose stub, `INTERCOM: STARTED` log line).
 - 2026-06-12 — first build (59 s, Gradle 8.14/AGP 8.11.1) + first device run: installed and launched on Pixel 10 Pro XL over USB, STARTED log confirmed. Screen was locked (owner on a call) so no UI screenshot; log line is the validation.
 - 2026-06-14 — codec decision Opus→ADPCM recorded (PR #8). CI taken native: in-CI sdkmanager installs NDK r27c + cmake 3.22.1, fail-loud bootstrap preflight, host `ctest` (ring_buffer, seq_filter), NDK-backed `assembleDebug` — all green (PR #9, run 7). Riskiest M0 infra item (runner native toolchain) proven. Phones not yet paired; M0 gate still open.

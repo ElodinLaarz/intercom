@@ -3,6 +3,8 @@ package com.elodin.intercom.session
 internal interface RadioEndpoint {
     fun start(): Boolean
 
+    fun beginEpoch(epochId: Long) = Unit
+
     fun stop()
 }
 

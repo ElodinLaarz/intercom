@@ -18,8 +18,9 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.util.Log
+import com.elodin.intercom.NativeCore
+import com.elodin.intercom.audio.VoiceAudioRoute
 import com.elodin.intercom.proto.Proto
-import com.elodin.intercom.proto.VoiceFrame
 import com.elodin.intercom.session.RadioEndpoint
 import com.elodin.intercom.session.RadioEvent
 import java.io.DataInputStream
@@ -63,6 +64,8 @@ internal class HostRadio(
     @Volatile
     private var clientSocket: BluetoothSocket? = null
     private val l2capLock = Any()
+    private val epochLock = Object()
+    private var linkedEpoch: Long? = null
     private var psmBytes: ByteArray = ByteArray(0)
     private var psm: Int = 0
     private val connectedGuests = CopyOnWriteArraySet<BluetoothDevice>()
@@ -105,6 +108,16 @@ internal class HostRadio(
         stop(reportStopped = true)
     }
 
+    override fun beginEpoch(epochId: Long) {
+        if (!running || torn) return
+        val started = startPlayout(epochId)
+        synchronized(epochLock) {
+            if (started && running && !torn) linkedEpoch = epochId
+            epochLock.notifyAll()
+        }
+        if (!started) emitFailed("Audio playout failed")
+    }
+
     private fun stop(reportStopped: Boolean) {
         torn = true
         running = false
@@ -126,6 +139,7 @@ internal class HostRadio(
             }
         }
         connectedGuests.clear()
+        stopPlayout()
         try {
             gattServer?.close()
         } catch (e: SecurityException) {
@@ -147,6 +161,38 @@ internal class HostRadio(
         Log.i(TAG, "RADIO host stopped")
         if (reportStopped) emitStatus("Stopped")
     }
+
+    private fun startPlayout(epochId: Long): Boolean {
+        if (epochId !in 0..MAX_WIRE_EPOCH) return false
+        VoiceAudioRoute.enterCommunication(context)
+        if (NativeCore.startHostPlayout(epochId)) return true
+
+        VoiceAudioRoute.leaveCommunication(context)
+        return false
+    }
+
+    private fun stopPlayout() {
+        NativeCore.stopHostPlayout()
+        VoiceAudioRoute.leaveCommunication(context)
+        synchronized(epochLock) {
+            linkedEpoch = null
+            epochLock.notifyAll()
+        }
+    }
+
+    private fun awaitLinkedEpoch(): Long? =
+        synchronized(epochLock) {
+            while (running && !torn && linkedEpoch == null) {
+                try {
+                    epochLock.wait(EPOCH_WAIT_MS)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@synchronized null
+                }
+            }
+            if (!running || torn) return@synchronized null
+            linkedEpoch
+        }
 
     private fun openL2capListener(adapter: BluetoothAdapter): Int {
         val socket = adapter.listenUsingInsecureL2capChannel()
@@ -182,49 +228,48 @@ internal class HostRadio(
         }
         val address = client.remoteDevice?.address ?: UNKNOWN_PEER
         Log.i(TAG, "RADIO l2cap accepted $address")
+        emitLinked(address)
+        val epoch = awaitLinkedEpoch()
+        if (epoch == null) {
+            detachClientSocket(client)
+            return
+        }
+        Log.i(TAG, "RADIO l2cap rx audio epoch=$epoch peer=$address")
         emitStatus("Voice link up — receiving from $address")
-        readFrames(client, address)
+        readFrames(client)
         detachClientSocket(client)
         if (running && !torn) emitLinkLost("Guest disconnected")
     }
 
-    // Drain frames until the guest drops or we tear down. #20 proves the wire
-    // format crosses L2CAP — decode + bounds-check (landmine #12); epoch/seq
-    // gating + the jitter buffer are the host receive path (#23).
-    private fun readFrames(
-        client: BluetoothSocket,
-        peer: String,
-    ) {
+    // Drain frames until the guest drops or we tear down. Native owns decode,
+    // epoch/SeqFilter gating, jitter buffering, and Oboe output (#23).
+    private fun readFrames(client: BluetoothSocket) {
         val input = DataInputStream(client.inputStream)
         val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
         var received = 0L
+        var accepted = 0L
         try {
             while (running && !torn) {
                 input.readFully(buf)
                 if (!running || torn) return
                 received += 1
-                reportFrame(buf, received, peer)
+                if (NativeCore.pushHostFrame(buf)) {
+                    accepted += 1
+                    reportAcceptedFrame(accepted)
+                    continue
+                }
+                Log.w(TAG, "RADIO l2cap rx dropped frame #$received")
             }
         } catch (e: IOException) {
             if (running && !torn) Log.w(TAG, "RADIO l2cap rx ended: ${e.message}")
         }
     }
 
-    private fun reportFrame(
-        buf: ByteArray,
-        received: Long,
-        peer: String,
-    ) {
-        val frame = VoiceFrame.decode(buf)
-        if (frame == null) {
-            Log.w(TAG, "RADIO l2cap rx dropped malformed frame #$received")
-            return
-        }
+    private fun reportAcceptedFrame(accepted: Long) {
         if (!running || torn) return
-        if (received > 1L) return
-        Log.i(TAG, "RADIO l2cap rx frame epoch=${frame.epoch} seq=${frame.seq} (first)")
-        emitLinked(peer)
-        emitStatus("Voice link up — first frame seq=${frame.seq}")
+        if (accepted > 1L) return
+        Log.i(TAG, "RADIO l2cap rx accepted first voice frame")
+        emitStatus("Voice link up — first audio frame")
     }
 
     private fun publishClientSocket(client: BluetoothSocket): Boolean =
@@ -434,5 +479,7 @@ internal class HostRadio(
     companion object {
         private const val TAG = "INTERCOM"
         private const val UNKNOWN_PEER = "unknown"
+        private const val MAX_WIRE_EPOCH = 0xFFFF_FFFFL
+        private const val EPOCH_WAIT_MS = 100L
     }
 }

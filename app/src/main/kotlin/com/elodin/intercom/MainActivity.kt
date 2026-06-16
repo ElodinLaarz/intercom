@@ -52,7 +52,7 @@ class MainActivity : ComponentActivity() {
     private val requestGuestPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
             if (!grants.values.all { it }) {
-                Log.w(TAG, "scan perms denied")
+                Log.w(TAG, "guest perms denied")
                 return@registerForActivityResult
             }
             radio.startGuest()
@@ -101,7 +101,11 @@ class MainActivity : ComponentActivity() {
             return
         }
         ensurePermissions(
-            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT),
+            arrayOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.RECORD_AUDIO,
+            ),
             requestGuestPermissions,
         ) { radio.startGuest() }
     }
