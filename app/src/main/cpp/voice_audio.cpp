@@ -28,6 +28,7 @@ namespace {
 
 constexpr int kJitterTargetFrames = 3;
 constexpr std::uint32_t kDiagEveryFrames = 100;  // 2 s at 50 fps.
+constexpr std::uint32_t kOutputWatchEveryFrames = 50;
 constexpr std::size_t kQueueSlots = 17;  // 16 usable SPSC slots.
 constexpr std::uint32_t kMaxSilenceFillFrames = 3;
 
@@ -163,6 +164,11 @@ struct RxEngine::Impl {
   bool pushFrame(const std::uint8_t* data, std::size_t len);
   oboe::DataCallbackResult onAudioReady(void* audioData, int32_t numFrames);
 
+  bool openOutputStreamLocked();
+  bool startOutputStreamLocked();
+  void ensureOutputStarted();
+  void watchOutputProgress(std::uint64_t acceptedCount);
+  void restartOutputStream();
   void render(std::int16_t* out, int32_t numFrames);
   void prepareNextPcmFrame();
   void fillCurrentWithSilence();
@@ -179,7 +185,11 @@ struct RxEngine::Impl {
   std::array<std::int16_t, proto::kVoiceFrameSamples> currentPcm{};
   int currentIndex = proto::kVoiceFrameSamples;
   bool playoutStarted = false;
+  std::uint64_t lastWatchDecoded = 0;
+  int stalledWatchCount = 0;
+  std::mutex streamMutex;
   std::shared_ptr<oboe::AudioStream> stream;
+  bool streamStarted = false;
   Callback callback;
 };
 
@@ -357,9 +367,7 @@ bool RxEngine::pushFrame(const std::uint8_t* data, std::size_t len) {
   return impl_->pushFrame(data, len);
 }
 
-bool RxEngine::Impl::start() {
-  stopping.store(false, std::memory_order_release);
-
+bool RxEngine::Impl::openOutputStreamLocked() {
   oboe::AudioStreamBuilder builder;
   builder.setDirection(oboe::Direction::Output);
   builder.setSharingMode(oboe::SharingMode::Shared);
@@ -380,15 +388,30 @@ bool RxEngine::Impl::start() {
        seqFilter.epoch(), stream->getSampleRate(), stream->getChannelCount(),
        static_cast<int>(stream->getSharingMode()),
        static_cast<int>(stream->getPerformanceMode()));
+  return true;
+}
 
-  if (startStream(stream, "output")) return true;
+bool RxEngine::Impl::startOutputStreamLocked() {
+  if (streamStarted) return true;
+  if (!stream) return false;
+  if (!startStream(stream, "output")) return false;
 
-  stopStream(stream);
-  return false;
+  streamStarted = true;
+  LOGI("AUDIO output start epoch=%u buffered=%zu", seqFilter.epoch(),
+       jitter.depth());
+  return true;
+}
+
+bool RxEngine::Impl::start() {
+  stopping.store(false, std::memory_order_release);
+  std::lock_guard<std::mutex> lock(streamMutex);
+  return openOutputStreamLocked();
 }
 
 void RxEngine::Impl::stop() {
   stopping.store(true, std::memory_order_release);
+  std::lock_guard<std::mutex> lock(streamMutex);
+  streamStarted = false;
   stopStream(stream);
 }
 
@@ -421,6 +444,8 @@ bool RxEngine::Impl::pushFrame(const std::uint8_t* data, std::size_t len) {
   const std::uint64_t acceptedCount =
       accepted.fetch_add(1, std::memory_order_relaxed) + 1;
   jitter.push(PlayoutFrame::voiceFrame(*parsed));
+  ensureOutputStarted();
+  watchOutputProgress(acceptedCount);
   if (acceptedCount % kDiagEveryFrames == 0) {
     LOGI(
         "DIAG epoch=%u rxSeq=%u lost=%llu qDepth=%zu jitterMs=%zu "
@@ -437,6 +462,48 @@ bool RxEngine::Impl::pushFrame(const std::uint8_t* data, std::size_t len) {
             decodedFrames.load(std::memory_order_relaxed)));
   }
   return true;
+}
+
+void RxEngine::Impl::ensureOutputStarted() {
+  if (jitter.depth() < kJitterTargetFrames) return;
+
+  std::lock_guard<std::mutex> lock(streamMutex);
+  startOutputStreamLocked();
+}
+
+void RxEngine::Impl::watchOutputProgress(std::uint64_t acceptedCount) {
+  if (acceptedCount % kOutputWatchEveryFrames != 0) return;
+  if (jitter.depth() < kJitterTargetFrames) {
+    stalledWatchCount = 0;
+    lastWatchDecoded = decodedFrames.load(std::memory_order_relaxed);
+    return;
+  }
+
+  const std::uint64_t decoded =
+      decodedFrames.load(std::memory_order_relaxed);
+  if (decoded != lastWatchDecoded) {
+    stalledWatchCount = 0;
+    lastWatchDecoded = decoded;
+    return;
+  }
+
+  stalledWatchCount += 1;
+  if (stalledWatchCount < 2) return;
+
+  LOGW("AUDIO output stalled epoch=%u decoded=%llu qDepth=%zu; restarting",
+       seqFilter.epoch(), static_cast<unsigned long long>(decoded),
+       jitter.depth());
+  restartOutputStream();
+  stalledWatchCount = 0;
+  lastWatchDecoded = decodedFrames.load(std::memory_order_relaxed);
+}
+
+void RxEngine::Impl::restartOutputStream() {
+  std::lock_guard<std::mutex> lock(streamMutex);
+  streamStarted = false;
+  stopStream(stream);
+  if (!openOutputStreamLocked()) return;
+  startOutputStreamLocked();
 }
 
 oboe::DataCallbackResult RxEngine::Impl::onAudioReady(void* audioData,

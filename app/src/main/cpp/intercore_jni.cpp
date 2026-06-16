@@ -117,7 +117,7 @@ Java_com_elodin_intercom_NativeCore_startHostPlayout(JNIEnv*, jobject,
     g_rx = engine;
   }
   if (old) old->stop();
-  LOGI("AUDIO host playout started epoch=%u", wireEpoch(epoch));
+  LOGI("AUDIO host playout ready epoch=%u", wireEpoch(epoch));
   return JNI_TRUE;
 }
 
