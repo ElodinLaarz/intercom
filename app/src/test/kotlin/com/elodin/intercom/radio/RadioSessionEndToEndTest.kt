@@ -16,19 +16,24 @@ class RadioSessionEndToEndTest {
         guestRig.guest.status("Scanning for host…")
 
         hostRig.host.status("Guest GATT connected — waiting for PSM read")
-        guestRig.guest.status("Linked — host PSM 177 (L2CAP CoC is #20)")
+        hostRig.host.status("Guest read PSM — waiting for L2CAP")
+        guestRig.guest.status("Host PSM 177 — opening voice link…")
+        guestRig.guest.status("Voice link up — sent first frame")
+        hostRig.host.status("Voice link up — first frame seq=0")
 
         hostRig.controller.stopHost()
-        guestRig.guest.status("Scanning for host…")
+        guestRig.guest.status("Host disconnected — rescanning…")
 
         assertEquals(DesiredRadioRole.Idle, hostRig.controller.state.desiredRole)
         assertTrue(guestRig.controller.state.guesting)
-        assertEquals("Scanning for host…", guestRig.controller.state.status)
+        assertEquals("Host disconnected — rescanning…", guestRig.controller.state.status)
 
         hostRig.controller.startHost()
         hostRig.host.status("Advertising — PSM 199 — waiting for a guest")
         guestRig.guest.status("Found host AA:BB:CC:DD:EE:FF — connecting…")
-        guestRig.guest.status("Linked — host PSM 199 (L2CAP CoC is #20)")
+        guestRig.guest.status("Host PSM 199 — opening voice link…")
+        guestRig.guest.status("Voice link up — sent first frame")
+        hostRig.host.status("Voice link up — first frame seq=0")
 
         assertTrue(hostRig.controller.state.hosting)
         assertTrue(guestRig.controller.state.guesting)

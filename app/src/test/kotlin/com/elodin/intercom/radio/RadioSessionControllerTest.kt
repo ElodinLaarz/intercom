@@ -12,12 +12,13 @@ class RadioSessionControllerTest {
         fixture.controller.startGuest()
         val guest = fixture.factory.guests.single()
 
-        guest.status("Linked — host PSM 177 (L2CAP CoC is #20)")
-        guest.status("Scanning for host…")
+        guest.status("Host PSM 177 — opening voice link…")
+        guest.status("Voice link up — sent first frame")
+        guest.status("Host disconnected — rescanning…")
 
         assertTrue(fixture.controller.state.guesting)
         assertFalse(fixture.controller.state.hosting)
-        assertEquals("Scanning for host…", fixture.controller.state.status)
+        assertEquals("Host disconnected — rescanning…", fixture.controller.state.status)
     }
 
     @Test
@@ -38,7 +39,7 @@ class RadioSessionControllerTest {
         val guest = fixture.factory.guests.single()
 
         fixture.controller.stopGuest()
-        guest.status("Linked — stale")
+        guest.status("Voice link up — stale")
         guest.stoppedCallback()
 
         assertEquals(DesiredRadioRole.Idle, fixture.controller.state.desiredRole)
@@ -52,7 +53,7 @@ class RadioSessionControllerTest {
         val oldGuest = fixture.factory.guests.single()
 
         fixture.controller.startHost()
-        oldGuest.status("Linked — stale")
+        oldGuest.status("Voice link up — stale")
 
         assertTrue(fixture.controller.state.hosting)
         assertFalse(fixture.controller.state.guesting)

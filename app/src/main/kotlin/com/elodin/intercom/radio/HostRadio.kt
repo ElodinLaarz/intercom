@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothServerSocket
+import android.bluetooth.BluetoothSocket
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -18,6 +19,8 @@ import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.util.Log
 import com.elodin.intercom.proto.Proto
+import com.elodin.intercom.proto.VoiceFrame
+import java.io.DataInputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -43,6 +46,7 @@ import kotlin.concurrent.thread
  * marshals to the main thread.
  */
 @SuppressLint("MissingPermission")
+@Suppress("TooManyFunctions")
 internal class HostRadio(
     private val context: Context,
     private val onStatus: (String) -> Unit,
@@ -54,6 +58,10 @@ internal class HostRadio(
     private var advertiser: BluetoothLeAdvertiser? = null
     private var gattServer: BluetoothGattServer? = null
     private var serverSocket: BluetoothServerSocket? = null
+
+    @Volatile
+    private var clientSocket: BluetoothSocket? = null
+    private val l2capLock = Any()
     private var psmBytes: ByteArray = ByteArray(0)
     private var psm: Int = 0
     private val connectedGuests = CopyOnWriteArraySet<BluetoothDevice>()
@@ -122,6 +130,10 @@ internal class HostRadio(
         } catch (e: SecurityException) {
             Log.w(TAG, "RADIO stop gatt: ${e.message}")
         }
+        // Closing the accepted CoC is what the guest actually detects: its read
+        // returns EOF (GuestRadio.watchForClose). The guest's own open CoC keeps
+        // the shared ACL up, so GATT-cancel above never reaches it (rig, #20).
+        closeClientSocket()
         try {
             serverSocket?.close()
         } catch (e: IOException) {
@@ -129,6 +141,7 @@ internal class HostRadio(
         }
         advertiser = null
         gattServer = null
+        clientSocket = null
         serverSocket = null
         Log.i(TAG, "RADIO host stopped")
         if (reportStopped) onStatus("Stopped")
@@ -155,16 +168,92 @@ internal class HostRadio(
     private fun acceptLoop(socket: BluetoothServerSocket) {
         try {
             while (running) {
-                val client = socket.accept()
-                val address = client.remoteDevice?.address
-                Log.i(TAG, "RADIO l2cap accepted $address")
-                onStatus("L2CAP accepted from $address — closing until #20")
-                // Frame I/O is #20; this PR only proves the listener accepts.
-                client.close()
-                if (running) onStatus("Advertising — PSM $psm — waiting for a guest")
+                receiveFrom(socket.accept())
             }
         } catch (e: IOException) {
             if (running) Log.w(TAG, "RADIO l2cap accept ended: ${e.message}")
+        }
+    }
+
+    private fun receiveFrom(client: BluetoothSocket) {
+        if (!publishClientSocket(client)) {
+            closeSocket(client, "l2cap stale client")
+            return
+        }
+        val address = client.remoteDevice?.address
+        Log.i(TAG, "RADIO l2cap accepted $address")
+        onStatus("Voice link up — receiving from $address")
+        readFrames(client)
+        detachClientSocket(client)
+        if (running && !torn) onStatus("Advertising — PSM $psm — waiting for a guest")
+    }
+
+    // Drain frames until the guest drops or we tear down. #20 proves the wire
+    // format crosses L2CAP — decode + bounds-check (landmine #12); epoch/seq
+    // gating + the jitter buffer are the host receive path (#23).
+    private fun readFrames(client: BluetoothSocket) {
+        val input = DataInputStream(client.inputStream)
+        val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
+        var received = 0L
+        try {
+            while (running && !torn) {
+                input.readFully(buf)
+                if (!running || torn) return
+                received += 1
+                reportFrame(buf, received)
+            }
+        } catch (e: IOException) {
+            if (running && !torn) Log.w(TAG, "RADIO l2cap rx ended: ${e.message}")
+        }
+    }
+
+    private fun reportFrame(
+        buf: ByteArray,
+        received: Long,
+    ) {
+        val frame = VoiceFrame.decode(buf)
+        if (frame == null) {
+            Log.w(TAG, "RADIO l2cap rx dropped malformed frame #$received")
+            return
+        }
+        if (!running || torn) return
+        if (received > 1L) return
+        Log.i(TAG, "RADIO l2cap rx frame epoch=${frame.epoch} seq=${frame.seq} (first)")
+        onStatus("Voice link up — first frame seq=${frame.seq}")
+    }
+
+    private fun publishClientSocket(client: BluetoothSocket): Boolean =
+        synchronized(l2capLock) {
+            if (!running || torn) return@synchronized false
+            clientSocket = client
+            true
+        }
+
+    private fun closeClientSocket() {
+        val socket =
+            synchronized(l2capLock) {
+                val closingSocket = clientSocket
+                clientSocket = null
+                closingSocket
+            }
+        closeSocket(socket, "l2cap client")
+    }
+
+    private fun detachClientSocket(client: BluetoothSocket) {
+        synchronized(l2capLock) {
+            if (clientSocket === client) clientSocket = null
+        }
+        closeSocket(client, "l2cap client")
+    }
+
+    private fun closeSocket(
+        socket: BluetoothSocket?,
+        label: String,
+    ) {
+        try {
+            socket?.close()
+        } catch (e: IOException) {
+            Log.w(TAG, "RADIO close $label: ${e.message}")
         }
     }
 

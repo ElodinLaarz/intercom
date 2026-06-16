@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothSocket
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
@@ -18,10 +19,13 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import com.elodin.intercom.proto.Proto
+import com.elodin.intercom.proto.VoiceFrame
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
 
 /**
  * Guest side of the M1 link (issue #19, M1_PLAN §3 step 4): scan with a
@@ -49,6 +53,12 @@ internal class GuestRadio(
 
     private var scanner: BluetoothLeScanner? = null
     private var gatt: BluetoothGatt? = null
+    private var hostDevice: BluetoothDevice? = null
+
+    @Volatile
+    private var clientSocket: BluetoothSocket? = null
+    private val l2capGeneration = AtomicInteger(0)
+    private val l2capLock = Any()
 
     @Volatile
     private var running = false
@@ -81,6 +91,7 @@ internal class GuestRadio(
         scanning = false
         scanGeneration.incrementAndGet()
         stopCurrentScan()
+        closeL2cap()
         closeGatt(disconnect = true)
         scanner = null
         Log.i(TAG, "RADIO guest stopped")
@@ -89,6 +100,7 @@ internal class GuestRadio(
     }
 
     private fun connectToHost(device: BluetoothDevice) {
+        hostDevice = device
         val nextGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         if (nextGatt == null) {
             fail("GATT connect failed to start")
@@ -179,9 +191,10 @@ internal class GuestRadio(
     private fun retryScanAfterGatt(message: String) {
         if (torn) return
         Log.w(TAG, "RADIO $message")
+        closeL2cap()
         closeGatt(disconnect = false)
         if (running) {
-            scheduleScanRetry(SCAN_STATUS, GATT_RESCAN_DELAY_MS)
+            scheduleScanRetry(RECONNECT_STATUS, GATT_RESCAN_DELAY_MS)
         }
     }
 
@@ -191,14 +204,14 @@ internal class GuestRadio(
     ) {
         val generation = prepareScanRetry()
         onStatus(statusMessage)
-        postScanRetry(generation, delayMs)
+        postScanRetry(generation, delayMs, statusMessage)
     }
 
     private fun scheduleScanCooldown(delayMs: Long) {
         val generation = prepareScanRetry()
         val retryAtMs = SystemClock.elapsedRealtime() + delayMs
         updateCooldownStatus(generation, retryAtMs)
-        postScanRetry(generation, delayMs)
+        postScanRetry(generation, delayMs, SCAN_STATUS)
     }
 
     private fun prepareScanRetry(): Int {
@@ -211,11 +224,12 @@ internal class GuestRadio(
     private fun postScanRetry(
         generation: Int,
         delayMs: Long,
+        statusMessage: String,
     ) {
         mainHandler.postDelayed(
             {
                 if (running && !torn && generation == scanGeneration.get()) {
-                    beginScan(SCAN_STATUS, keepTrying = true)
+                    beginScan(statusMessage, keepTrying = true)
                 }
             },
             delayMs,
@@ -283,6 +297,171 @@ internal class GuestRadio(
             closingGatt?.close()
         } catch (e: SecurityException) {
             Log.w(TAG, "RADIO stop gatt: ${e.message}")
+        }
+    }
+
+    private fun openL2cap(psm: Int) {
+        val device = hostDevice
+        if (device == null) {
+            fail("No host device for L2CAP")
+            return
+        }
+        val generation =
+            synchronized(l2capLock) {
+                if (!running || torn) return
+                l2capGeneration.incrementAndGet()
+            }
+        thread(isDaemon = true, name = "l2cap-connect") { connectLoop(generation, device, psm) }
+    }
+
+    // Open the CoC to the host's PSM and push one self-contained voice frame
+    // (guest → host — the M1 direction). Retries on the bounded backoff ladder
+    // (landmine #8); the real monotonic epoch arrives with the session (#21).
+    private fun connectLoop(
+        generation: Int,
+        device: BluetoothDevice,
+        psm: Int,
+    ) {
+        val ladder = BackoffLadder()
+        var attempt = 0
+        while (isL2capCurrent(generation)) {
+            val socket = openAndSend(generation, device, psm)
+            if (socket != null) {
+                watchForClose(generation, socket)
+                return
+            }
+            val delayMs = ladder.delayBeforeRetryMs(attempt) ?: break
+            if (!sleepLadder(delayMs)) return
+            attempt += 1
+        }
+        if (isL2capCurrent(generation)) fail("L2CAP connect failed")
+    }
+
+    private fun openAndSend(
+        generation: Int,
+        device: BluetoothDevice,
+        psm: Int,
+    ): BluetoothSocket? {
+        var socket: BluetoothSocket? = null
+        var connectedSocket: BluetoothSocket? = null
+        try {
+            socket = device.createInsecureL2capChannel(psm)
+            if (publishSocketIfCurrent(generation, socket)) {
+                socket.connect()
+                if (sendFirstFrameIfCurrent(generation, socket)) {
+                    connectedSocket = socket
+                }
+            }
+        } catch (e: IOException) {
+            Log.w(TAG, "RADIO l2cap connect/tx failed: ${e.message}")
+        } catch (e: SecurityException) {
+            Log.e(TAG, "RADIO l2cap permission failure: ${e.message}")
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "RADIO l2cap rejected PSM $psm: ${e.message}")
+        }
+        if (connectedSocket == null) {
+            closeAndDetachSocket(socket)
+        }
+        return connectedSocket
+    }
+
+    private fun sendFirstFrameIfCurrent(
+        generation: Int,
+        socket: BluetoothSocket,
+    ): Boolean {
+        if (!isL2capCurrent(generation)) return false
+        val frame =
+            VoiceFrame(
+                epoch = L2CAP_TEST_EPOCH,
+                seq = 0,
+                predSample = 0,
+                stepIndex = 0,
+                adpcm = ByteArray(Proto.VOICE_ADPCM_BYTES),
+            )
+        socket.outputStream.write(frame.encode())
+        socket.outputStream.flush()
+        if (!isL2capCurrent(generation)) return false
+        Log.i(TAG, "RADIO l2cap tx frame epoch=${frame.epoch} seq=${frame.seq}")
+        onStatus("Voice link up — sent first frame")
+        return true
+    }
+
+    // One-way M1: the guest never receives audio, but it must still notice the
+    // host vanishing. Symmetric to the host's readFrames — block on the CoC and
+    // treat EOF/close as the host leaving. GATT-disconnect can't be relied on:
+    // the guest's own open CoC keeps the shared ACL up, so a host-side GATT
+    // cancel never reaches it (rig finding, #20). M2's duplex receive path
+    // replaces this watch with the real decode pipeline.
+    private fun watchForClose(
+        generation: Int,
+        socket: BluetoothSocket,
+    ) {
+        val input = socket.inputStream
+        val sink = ByteArray(Proto.VOICE_FRAME_BYTES)
+        try {
+            while (isL2capCurrent(generation)) {
+                if (input.read(sink) < 0) break
+            }
+        } catch (e: IOException) {
+            Log.w(TAG, "RADIO l2cap watch ended: ${e.message}")
+        }
+        if (!isL2capCurrent(generation)) return
+        Log.w(TAG, "RADIO l2cap host closed — link lost")
+        mainHandler.post { onHostGone(generation) }
+    }
+
+    private fun onHostGone(generation: Int) {
+        if (!isL2capCurrent(generation)) return
+        retryScanAfterGatt("Host disconnected")
+    }
+
+    private fun sleepLadder(delayMs: Long): Boolean {
+        try {
+            Thread.sleep(delayMs)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return false
+        }
+        return running && !torn
+    }
+
+    private fun closeL2cap() {
+        val socket =
+            synchronized(l2capLock) {
+                l2capGeneration.incrementAndGet()
+                val closingSocket = clientSocket
+                clientSocket = null
+                hostDevice = null
+                closingSocket
+            }
+        closeSocket(socket)
+    }
+
+    private fun publishSocketIfCurrent(
+        generation: Int,
+        socket: BluetoothSocket,
+    ): Boolean =
+        synchronized(l2capLock) {
+            if (!isL2capCurrent(generation)) return@synchronized false
+            clientSocket = socket
+            true
+        }
+
+    private fun closeAndDetachSocket(socket: BluetoothSocket?) {
+        if (socket == null) return
+        synchronized(l2capLock) {
+            if (clientSocket === socket) clientSocket = null
+        }
+        closeSocket(socket)
+    }
+
+    private fun isL2capCurrent(generation: Int): Boolean = running && !torn && generation == l2capGeneration.get()
+
+    private fun closeSocket(socket: BluetoothSocket?) {
+        try {
+            socket?.close()
+        } catch (e: IOException) {
+            Log.w(TAG, "RADIO l2cap close: ${e.message}")
         }
     }
 
@@ -422,13 +601,19 @@ internal class GuestRadio(
             return
         }
         Log.i(TAG, "RADIO gatt read PSM=$psm status=$status")
-        onStatus("Linked — host PSM $psm (L2CAP CoC is #20)")
+        onStatus("Host PSM $psm — opening voice link…")
+        openL2cap(psm)
     }
 
     companion object {
         private const val TAG = "INTERCOM"
         private const val MTU = 517
+
+        // Placeholder epoch until the session machine (#21) owns the monotonic
+        // connection epoch; the host logs it but does not gate on it yet (#23).
+        private const val L2CAP_TEST_EPOCH = 1
         private const val SCAN_STATUS = "Scanning for host…"
+        private const val RECONNECT_STATUS = "Host disconnected — rescanning…"
         private const val GATT_RESCAN_DELAY_MS = 350L
         private const val SCAN_RETRY_MS = 750L
         private const val SCAN_REFRESH_MS = 10_000L
