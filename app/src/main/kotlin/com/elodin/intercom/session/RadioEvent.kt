@@ -14,6 +14,7 @@ internal sealed interface RadioEvent {
     data class Linked(
         val peer: String,
         val psm: Int,
+        val wireEpoch: Long = 0,
     ) : RadioEvent
 
     data class LinkLost(

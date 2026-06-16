@@ -18,11 +18,14 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import com.elodin.intercom.NativeCore
+import com.elodin.intercom.audio.VoiceAudioRoute
 import com.elodin.intercom.proto.Proto
-import com.elodin.intercom.proto.VoiceFrame
 import com.elodin.intercom.session.RadioEndpoint
 import com.elodin.intercom.session.RadioEvent
+import java.io.DataInputStream
 import java.io.IOException
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -60,6 +63,11 @@ internal class GuestRadio(
     private var clientSocket: BluetoothSocket? = null
     private val l2capGeneration = AtomicInteger(0)
     private val l2capLock = Any()
+    private val audioLock = Any()
+    private val epochLock = Object()
+    private var linkedEpoch: Long? = null
+    private var captureStarted = false
+    private var playoutStarted = false
 
     @Volatile
     private var running = false
@@ -86,11 +94,22 @@ internal class GuestRadio(
         stop(reportStopped = true)
     }
 
+    override fun beginEpoch(epochId: Long) {
+        if (!running || torn) return
+        val started = startAudio(epochId)
+        synchronized(epochLock) {
+            if (started && running && !torn) linkedEpoch = epochId
+            epochLock.notifyAll()
+        }
+        if (!started) fail("Audio start failed")
+    }
+
     private fun stop(reportStopped: Boolean) {
         torn = true
         running = false
         scanning = false
         scanGeneration.incrementAndGet()
+        stopAudio()
         stopCurrentScan()
         closeL2cap()
         closeGatt(disconnect = true)
@@ -109,9 +128,24 @@ internal class GuestRadio(
         gatt = nextGatt
     }
 
-    private fun parsePsm(value: ByteArray?): Int {
-        if (value == null || value.size < Integer.BYTES) return -1
-        return ByteBuffer.wrap(value).order(ByteOrder.LITTLE_ENDIAN).int
+    private data class HostLinkParams(
+        val psm: Int,
+        val wireEpoch: Long,
+    )
+
+    private fun parseHostLinkParams(value: ByteArray?): HostLinkParams? {
+        if (value == null || value.size < Integer.BYTES) return null
+
+        val bb = ByteBuffer.wrap(value).order(ByteOrder.LITTLE_ENDIAN)
+        val psm = bb.int
+        val wireEpoch =
+            if (value.size >= HOST_LINK_PARAMS_BYTES) {
+                bb.int.toLong() and MAX_WIRE_EPOCH
+            } else {
+                psm.toLong() and MAX_WIRE_EPOCH
+            }
+        if (psm <= 0 || wireEpoch == 0L) return null
+        return HostLinkParams(psm = psm, wireEpoch = wireEpoch)
     }
 
     private fun beginScan(
@@ -290,7 +324,102 @@ internal class GuestRadio(
         }
     }
 
-    private fun openL2cap(psm: Int) {
+    private fun startAudio(epochId: Long): Boolean {
+        if (!startCapture(epochId)) return false
+        if (startPlayout(epochId)) return true
+
+        stopCapture()
+        return false
+    }
+
+    private fun stopAudio() {
+        stopCapture()
+        stopPlayout()
+        synchronized(epochLock) {
+            linkedEpoch = null
+            epochLock.notifyAll()
+        }
+    }
+
+    private fun startCapture(epochId: Long): Boolean =
+        synchronized(audioLock) {
+            if (captureStarted) return@synchronized true
+            if (epochId !in 0..MAX_WIRE_EPOCH) return@synchronized false
+
+            VoiceAudioRoute.enterCommunication(context)
+            if (NativeCore.startGuestCapture(epochId)) {
+                captureStarted = true
+                return@synchronized true
+            }
+
+            VoiceAudioRoute.leaveCommunication(context)
+            false
+        }
+
+    private fun stopCapture() {
+        synchronized(audioLock) {
+            if (!captureStarted) return
+
+            captureStarted = false
+            NativeCore.stopGuestCapture()
+            VoiceAudioRoute.leaveCommunication(context)
+        }
+    }
+
+    private fun startPlayout(epochId: Long): Boolean =
+        synchronized(audioLock) {
+            if (playoutStarted) return@synchronized true
+            if (epochId !in 0..MAX_WIRE_EPOCH) return@synchronized false
+
+            VoiceAudioRoute.enterCommunication(context)
+            if (NativeCore.startHostPlayout(epochId)) {
+                playoutStarted = true
+                return@synchronized true
+            }
+
+            VoiceAudioRoute.leaveCommunication(context)
+            false
+        }
+
+    private fun stopPlayout() {
+        synchronized(audioLock) {
+            if (!playoutStarted) return
+
+            playoutStarted = false
+            NativeCore.stopHostPlayout()
+            VoiceAudioRoute.leaveCommunication(context)
+        }
+    }
+
+    private fun restartCapture(epochId: Long): Boolean {
+        if (epochId !in 0..MAX_WIRE_EPOCH) return false
+        synchronized(audioLock) {
+            if (!captureStarted) return false
+
+            NativeCore.stopGuestCapture()
+            if (NativeCore.startGuestCapture(epochId)) return true
+
+            captureStarted = false
+            VoiceAudioRoute.leaveCommunication(context)
+            return false
+        }
+    }
+
+    private fun awaitLinkedEpoch(generation: Int): Long? =
+        synchronized(epochLock) {
+            while (isL2capCurrent(generation) && linkedEpoch == null) {
+                try {
+                    epochLock.wait(EPOCH_WAIT_MS)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@synchronized null
+                }
+            }
+            if (!isL2capCurrent(generation)) return@synchronized null
+            linkedEpoch
+        }
+
+    private fun openL2cap(params: HostLinkParams) {
         val device = hostDevice
         if (device == null) {
             fail("No host device for L2CAP")
@@ -301,25 +430,21 @@ internal class GuestRadio(
                 if (!running || torn) return
                 l2capGeneration.incrementAndGet()
             }
-        thread(isDaemon = true, name = "l2cap-connect") { connectLoop(generation, device, psm) }
+        thread(isDaemon = true, name = "l2cap-connect") { connectLoop(generation, device, params) }
     }
 
-    // Open the CoC to the host's PSM and push one self-contained voice frame
-    // (guest → host — the M1 direction). Retries on the bounded backoff ladder
-    // (landmine #8); the real monotonic epoch arrives with the session (#21).
+    // Open the CoC to the host's PSM and run duplex voice over one fixed-frame
+    // byte stream. Retries on the bounded backoff ladder (landmine #8) only for
+    // pre-link failures; once linked, a disconnect returns the session idle.
     private fun connectLoop(
         generation: Int,
         device: BluetoothDevice,
-        psm: Int,
+        params: HostLinkParams,
     ) {
         val ladder = BackoffLadder()
         var attempt = 0
         while (isL2capCurrent(generation)) {
-            val socket = openAndSend(generation, device, psm)
-            if (socket != null) {
-                watchForClose(generation, socket)
-                return
-            }
+            if (openAndStream(generation, device, params)) return
             val delayMs = ladder.delayBeforeRetryMs(attempt) ?: break
             if (!sleepLadder(delayMs)) return
             attempt += 1
@@ -327,80 +452,157 @@ internal class GuestRadio(
         if (isL2capCurrent(generation)) fail("L2CAP connect failed")
     }
 
-    private fun openAndSend(
+    private fun openAndStream(
         generation: Int,
         device: BluetoothDevice,
-        psm: Int,
-    ): BluetoothSocket? {
+        params: HostLinkParams,
+    ): Boolean {
         var socket: BluetoothSocket? = null
-        var connectedSocket: BluetoothSocket? = null
         try {
-            socket = device.createInsecureL2capChannel(psm)
+            socket = device.createInsecureL2capChannel(params.psm)
             if (publishSocketIfCurrent(generation, socket)) {
                 socket.connect()
-                if (sendFirstFrameIfCurrent(generation, socket, device, psm)) {
-                    connectedSocket = socket
-                }
+                streamAudioIfCurrent(generation, socket, device, params)
+                closeAndDetachSocket(socket)
+                return true
             }
         } catch (e: IOException) {
             Log.w(TAG, "RADIO l2cap connect/tx failed: ${e.message}")
         } catch (e: SecurityException) {
             Log.e(TAG, "RADIO l2cap permission failure: ${e.message}")
         } catch (e: IllegalArgumentException) {
-            Log.e(TAG, "RADIO l2cap rejected PSM $psm: ${e.message}")
+            Log.e(TAG, "RADIO l2cap rejected PSM ${params.psm}: ${e.message}")
         }
-        if (connectedSocket == null) {
-            closeAndDetachSocket(socket)
-        }
-        return connectedSocket
+        closeAndDetachSocket(socket)
+        return false
     }
 
-    private fun sendFirstFrameIfCurrent(
+    private fun streamAudioIfCurrent(
         generation: Int,
         socket: BluetoothSocket,
         device: BluetoothDevice,
-        psm: Int,
-    ): Boolean {
-        if (!isL2capCurrent(generation)) return false
-        val frame =
-            VoiceFrame(
-                epoch = L2CAP_TEST_EPOCH,
-                seq = 0,
-                predSample = 0,
-                stepIndex = 0,
-                adpcm = ByteArray(Proto.VOICE_ADPCM_BYTES),
-            )
-        socket.outputStream.write(frame.encode())
-        socket.outputStream.flush()
-        if (!isL2capCurrent(generation)) return false
-        Log.i(TAG, "RADIO l2cap tx frame epoch=${frame.epoch} seq=${frame.seq}")
-        emitLinked(device.address, psm)
-        emitStatus("Voice link up — sent first frame")
-        return true
+        params: HostLinkParams,
+    ) {
+        if (!isL2capCurrent(generation)) return
+        Log.i(TAG, "RADIO l2cap tx connected ${device.address} wireEpoch=${params.wireEpoch}")
+        emitLinked(device.address, params)
+        val epoch = awaitLinkedEpoch(generation) ?: return
+        if (!isL2capCurrent(generation)) return
+
+        Log.i(TAG, "RADIO l2cap duplex audio epoch=$epoch")
+        emitStatus("Voice link up — duplex audio")
+        thread(isDaemon = true, name = "l2cap-rx") { readRemoteFrames(generation, socket) }
+        writeCaptureFrames(generation, socket, epoch)
     }
 
-    // One-way M1: the guest never receives audio, but it must still notice the
-    // host vanishing. Symmetric to the host's readFrames — block on the CoC and
-    // treat EOF/close as the host leaving. GATT-disconnect can't be relied on:
-    // the guest's own open CoC keeps the shared ACL up, so a host-side GATT
-    // cancel never reaches it (rig finding, #20). M2's duplex receive path
-    // replaces this watch with the real decode pipeline.
-    private fun watchForClose(
+    private fun writeCaptureFrames(
+        generation: Int,
+        socket: BluetoothSocket,
+        epoch: Long,
+    ) {
+        val output = socket.outputStream
+        val txMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
+        var lastFrameAtMs = SystemClock.elapsedRealtime()
+        try {
+            while (isL2capCurrent(generation)) {
+                val bundleFrames = bundleFramesForRoute()
+                val bundle = NativeCore.takeGuestBundle(bundleFrames, TX_FRAME_TIMEOUT_MS)
+                if (bundle == null) {
+                    lastFrameAtMs = recoverCaptureIfStalled(epoch, lastFrameAtMs) ?: return
+                    continue
+                }
+                lastFrameAtMs = SystemClock.elapsedRealtime()
+                val writeMs = writeBundle(output, bundle)
+                txMeter.onSample(bundleFrames, bundle.size, writeMs)?.let { Log.i(TAG, "TXNET epoch=$epoch $it") }
+            }
+        } catch (e: IOException) {
+            if (isL2capCurrent(generation)) {
+                Log.w(TAG, "RADIO l2cap tx ended: ${e.message}")
+                emitLinkLost("Host disconnected")
+            }
+        } finally {
+            stopCapture()
+            closeAndDetachSocket(socket)
+        }
+    }
+
+    private fun recoverCaptureIfStalled(
+        epoch: Long,
+        lastFrameAtMs: Long,
+    ): Long? {
+        val nowMs = SystemClock.elapsedRealtime()
+        if (nowMs - lastFrameAtMs <= CAPTURE_STALL_RESTART_MS) return lastFrameAtMs
+
+        Log.w(TAG, "AUDIO capture starved — restarting epoch=$epoch")
+        if (restartCapture(epoch)) return SystemClock.elapsedRealtime()
+
+        emitLinkLost("Audio capture stalled")
+        return null
+    }
+
+    // Smaller packet rate on a radio-sharing BT route (landmine #1): bundle
+    // consecutive frames into one write rather than dropping them — dropping
+    // decimates speech into silence. Native returns the freshest contiguous run,
+    // so the peer plays the bundle gap-free.
+    private fun bundleFramesForRoute(): Int {
+        if (VoiceAudioRoute.isCommunicationRouteDegraded()) return DEGRADED_BUNDLE_FRAMES
+        return 1
+    }
+
+    // One socket write carries a whole bundle of consecutive frames; returns how
+    // long write()+flush() blocked so the meter can spot send backpressure.
+    // IOException propagates to the writer loop and ends the link.
+    private fun writeBundle(
+        output: OutputStream,
+        bundle: ByteArray,
+    ): Long {
+        val startMs = SystemClock.elapsedRealtime()
+        output.write(bundle)
+        output.flush()
+        return SystemClock.elapsedRealtime() - startMs
+    }
+
+    // Drain frames until the host drops or we tear down. Native owns decode,
+    // epoch/SeqFilter gating, jitter buffering, and Oboe output (#23).
+    private fun readRemoteFrames(
         generation: Int,
         socket: BluetoothSocket,
     ) {
-        val input = socket.inputStream
-        val sink = ByteArray(Proto.VOICE_FRAME_BYTES)
+        val input = DataInputStream(socket.inputStream)
+        val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
+        val rxMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
+        var received = 0L
+        var accepted = 0L
         try {
             while (isL2capCurrent(generation)) {
-                if (input.read(sink) < 0) break
+                val readStartMs = SystemClock.elapsedRealtime()
+                input.readFully(buf)
+                val readMs = SystemClock.elapsedRealtime() - readStartMs
+                if (!isL2capCurrent(generation)) return
+                received += 1
+                rxMeter.onSample(1, buf.size, readMs)?.let { Log.i(TAG, "RXNET $it") }
+                if (NativeCore.pushHostFrame(buf)) {
+                    accepted += 1
+                    reportAcceptedFrame(accepted)
+                    continue
+                }
+                Log.w(TAG, "RADIO l2cap rx dropped frame #$received")
             }
         } catch (e: IOException) {
-            Log.w(TAG, "RADIO l2cap watch ended: ${e.message}")
+            if (isL2capCurrent(generation)) Log.w(TAG, "RADIO l2cap rx ended: ${e.message}")
+        } finally {
+            closeAndDetachSocket(socket)
         }
         if (!isL2capCurrent(generation)) return
         Log.w(TAG, "RADIO l2cap host closed — link lost")
         emitLinkLost("Host disconnected")
+    }
+
+    private fun reportAcceptedFrame(accepted: Long) {
+        if (!running || torn) return
+        if (accepted > 1L) return
+        Log.i(TAG, "RADIO l2cap rx accepted first voice frame")
+        emitStatus("Voice link up — first remote audio frame")
     }
 
     private fun sleepLadder(delayMs: Long): Boolean {
@@ -498,10 +700,13 @@ internal class GuestRadio(
                 val connectedGatt = g ?: return fail("GATT connected without a handle")
                 emitStatus("Connected — negotiating link…")
                 // Central drives connection params: HIGH priority (landmine
-                // #1) + the 517 MTU, before service discovery.
+                // #1) + the 517 MTU, before service discovery. HIGH is not
+                // sticky — Android reverts the interval to BALANCED after the
+                // initial burst — so re-assert it on a timer for the link's life.
                 if (!connectedGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)) {
                     Log.w(TAG, "RADIO gatt requestConnectionPriority returned false")
                 }
+                scheduleConnPriorityRefresh(connectedGatt)
                 if (!connectedGatt.requestMtu(MTU)) {
                     Log.w(TAG, "RADIO gatt requestMtu returned false; discovering services")
                     discoverServices(connectedGatt)
@@ -569,13 +774,29 @@ internal class GuestRadio(
         }
     }
 
+    // Re-assert HIGH connection priority on a timer (landmine #1): the request is
+    // not sticky — Android relaxes the interval back toward BALANCED after the
+    // initial transfer, which on the rig coincides with voice goodput collapsing
+    // a few seconds in. Self-stops when torn down or superseded by a new gatt.
+    private fun scheduleConnPriorityRefresh(g: BluetoothGatt) {
+        mainHandler.postDelayed(
+            {
+                if (torn || !running || gatt !== g) return@postDelayed
+                val ok = g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                Log.i(TAG, "RADIO reassert CONNECTION_PRIORITY_HIGH ok=$ok")
+                scheduleConnPriorityRefresh(g)
+            },
+            CONN_PRIORITY_REFRESH_MS,
+        )
+    }
+
     private fun handlePsmRead(
         uuid: UUID?,
         value: ByteArray?,
         status: Int,
     ) {
         if (torn) return
-        val psm = parsePsm(value)
+        val params = parseHostLinkParams(value)
         if (uuid != psmCharUuid) {
             fail("Unexpected GATT characteristic")
             return
@@ -584,20 +805,20 @@ internal class GuestRadio(
             fail("PSM read failed (status $status)")
             return
         }
-        if (psm <= 0) {
+        if (params == null) {
             fail("Invalid host PSM")
             return
         }
-        Log.i(TAG, "RADIO gatt read PSM=$psm status=$status")
-        emitStatus("Host PSM $psm — opening voice link…")
-        openL2cap(psm)
+        Log.i(TAG, "RADIO gatt read PSM=${params.psm} wireEpoch=${params.wireEpoch} status=$status")
+        emitStatus("Host PSM ${params.psm} — opening voice link…")
+        openL2cap(params)
     }
 
     private fun emitLinked(
         peer: String,
-        psm: Int,
+        params: HostLinkParams,
     ) {
-        onEvent(RadioEvent.Linked(peer = peer, psm = psm))
+        onEvent(RadioEvent.Linked(peer = peer, psm = params.psm, wireEpoch = params.wireEpoch))
     }
 
     private fun emitFound(
@@ -622,10 +843,15 @@ internal class GuestRadio(
     companion object {
         private const val TAG = "INTERCOM"
         private const val MTU = 517
+        private const val CONN_PRIORITY_REFRESH_MS = 4_000L
 
-        // Placeholder wire epoch until #23 threads the session epoch into the
-        // voice frame header; the host logs it but does not gate on it yet.
-        private const val L2CAP_TEST_EPOCH = 1
+        private const val MAX_WIRE_EPOCH = 4_294_967_295L // 2^32 - 1: max u32 wire epoch
+        private const val HOST_LINK_PARAMS_BYTES = 2 * Integer.BYTES
+        private const val EPOCH_WAIT_MS = 100L
+        private const val TX_FRAME_TIMEOUT_MS = 100
+        private const val DEGRADED_BUNDLE_FRAMES = 2
+        private const val TX_NET_WINDOW_MS = 2_000L
+        private const val CAPTURE_STALL_RESTART_MS = 2_000L
         private const val SCAN_STATUS = "Scanning for host…"
         private const val SCAN_RETRY_MS = 750L
         private const val SCAN_REFRESH_MS = 10_000L

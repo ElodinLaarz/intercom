@@ -17,13 +17,16 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
+import com.elodin.intercom.NativeCore
+import com.elodin.intercom.audio.VoiceAudioRoute
 import com.elodin.intercom.proto.Proto
-import com.elodin.intercom.proto.VoiceFrame
 import com.elodin.intercom.session.RadioEndpoint
 import com.elodin.intercom.session.RadioEvent
 import java.io.DataInputStream
 import java.io.IOException
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -63,8 +66,14 @@ internal class HostRadio(
     @Volatile
     private var clientSocket: BluetoothSocket? = null
     private val l2capLock = Any()
+    private val audioLock = Any()
+    private val epochLock = Object()
+    private var linkedEpoch: Long? = null
+    private var captureStarted = false
+    private var playoutStarted = false
     private var psmBytes: ByteArray = ByteArray(0)
     private var psm: Int = 0
+    private var wireEpoch: Long = 0
     private val connectedGuests = CopyOnWriteArraySet<BluetoothDevice>()
 
     @Volatile
@@ -88,10 +97,12 @@ internal class HostRadio(
         running = true
         val nextPsm = listenForL2cap(adapter) ?: return false
         psm = nextPsm
-        val buf = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN)
+        wireEpoch = nextWireEpoch()
+        val buf = ByteBuffer.allocate(HOST_LINK_PARAMS_BYTES).order(ByteOrder.LITTLE_ENDIAN)
         buf.putInt(psm)
+        buf.putInt(wireEpoch.toInt())
         psmBytes = buf.array()
-        Log.i(TAG, "RADIO l2cap listening psm=$psm")
+        Log.i(TAG, "RADIO l2cap listening psm=$psm wireEpoch=$wireEpoch")
         emitStatus("Starting host — PSM $psm")
         if (startGattServer(manager) && startAdvertising(adapter)) return true
 
@@ -103,6 +114,16 @@ internal class HostRadio(
     /** Tear everything down. Idempotent. */
     override fun stop() {
         stop(reportStopped = true)
+    }
+
+    override fun beginEpoch(epochId: Long) {
+        if (!running || torn) return
+        val started = startAudio(epochId)
+        synchronized(epochLock) {
+            if (started && running && !torn) linkedEpoch = epochId
+            epochLock.notifyAll()
+        }
+        if (!started) emitFailed("Audio start failed")
     }
 
     private fun stop(reportStopped: Boolean) {
@@ -126,14 +147,15 @@ internal class HostRadio(
             }
         }
         connectedGuests.clear()
+        stopAudio()
         try {
             gattServer?.close()
         } catch (e: SecurityException) {
             Log.w(TAG, "RADIO stop gatt: ${e.message}")
         }
-        // Closing the accepted CoC is what the guest actually detects: its read
-        // returns EOF (GuestRadio.watchForClose). The guest's own open CoC keeps
-        // the shared ACL up, so GATT-cancel above never reaches it (rig, #20).
+        // Closing the accepted CoC is what the guest actually detects: its
+        // duplex reader returns EOF. The guest's own open CoC keeps the shared
+        // ACL up, so GATT-cancel above never reaches it (rig, #20).
         closeClientSocket()
         try {
             serverSocket?.close()
@@ -144,9 +166,111 @@ internal class HostRadio(
         gattServer = null
         clientSocket = null
         serverSocket = null
+        wireEpoch = 0
         Log.i(TAG, "RADIO host stopped")
         if (reportStopped) emitStatus("Stopped")
     }
+
+    private fun nextWireEpoch(): Long {
+        val epoch = SystemClock.elapsedRealtimeNanos() and MAX_WIRE_EPOCH
+        if (epoch != 0L) return epoch
+        return psm.toLong() and MAX_WIRE_EPOCH
+    }
+
+    private fun startAudio(epochId: Long): Boolean {
+        if (!startPlayout(epochId)) return false
+        if (startCapture(epochId)) return true
+
+        stopPlayout()
+        return false
+    }
+
+    private fun stopAudio() {
+        stopCapture()
+        stopPlayout()
+        synchronized(epochLock) {
+            linkedEpoch = null
+            epochLock.notifyAll()
+        }
+    }
+
+    private fun startPlayout(epochId: Long): Boolean =
+        synchronized(audioLock) {
+            if (playoutStarted) return@synchronized true
+            if (epochId !in 0..MAX_WIRE_EPOCH) return@synchronized false
+
+            VoiceAudioRoute.enterCommunication(context)
+            if (NativeCore.startHostPlayout(epochId)) {
+                playoutStarted = true
+                return@synchronized true
+            }
+
+            VoiceAudioRoute.leaveCommunication(context)
+            false
+        }
+
+    private fun stopPlayout() {
+        synchronized(audioLock) {
+            if (!playoutStarted) return
+
+            playoutStarted = false
+            NativeCore.stopHostPlayout()
+            VoiceAudioRoute.leaveCommunication(context)
+        }
+    }
+
+    private fun startCapture(epochId: Long): Boolean =
+        synchronized(audioLock) {
+            if (captureStarted) return@synchronized true
+            if (epochId !in 0..MAX_WIRE_EPOCH) return@synchronized false
+
+            VoiceAudioRoute.enterCommunication(context)
+            if (NativeCore.startGuestCapture(epochId)) {
+                captureStarted = true
+                return@synchronized true
+            }
+
+            VoiceAudioRoute.leaveCommunication(context)
+            false
+        }
+
+    private fun stopCapture() {
+        synchronized(audioLock) {
+            if (!captureStarted) return
+
+            captureStarted = false
+            NativeCore.stopGuestCapture()
+            VoiceAudioRoute.leaveCommunication(context)
+        }
+    }
+
+    private fun restartCapture(epochId: Long): Boolean {
+        if (epochId !in 0..MAX_WIRE_EPOCH) return false
+        synchronized(audioLock) {
+            if (!captureStarted) return false
+
+            NativeCore.stopGuestCapture()
+            if (NativeCore.startGuestCapture(epochId)) return true
+
+            captureStarted = false
+            VoiceAudioRoute.leaveCommunication(context)
+            return false
+        }
+    }
+
+    private fun awaitLinkedEpoch(): Long? =
+        synchronized(epochLock) {
+            while (running && !torn && linkedEpoch == null) {
+                try {
+                    epochLock.wait(EPOCH_WAIT_MS)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@synchronized null
+                }
+            }
+            if (!running || torn) return@synchronized null
+            linkedEpoch
+        }
 
     private fun openL2capListener(adapter: BluetoothAdapter): Int {
         val socket = adapter.listenUsingInsecureL2capChannel()
@@ -181,51 +305,124 @@ internal class HostRadio(
             return
         }
         val address = client.remoteDevice?.address ?: UNKNOWN_PEER
-        Log.i(TAG, "RADIO l2cap accepted $address")
-        emitStatus("Voice link up — receiving from $address")
-        readFrames(client, address)
+        Log.i(TAG, "RADIO l2cap accepted $address wireEpoch=$wireEpoch")
+        emitLinked(address)
+        val epoch = awaitLinkedEpoch()
+        if (epoch == null) {
+            detachClientSocket(client)
+            return
+        }
+        Log.i(TAG, "RADIO l2cap rx audio epoch=$epoch peer=$address")
+        emitStatus("Voice link up — duplex audio with $address")
+        thread(isDaemon = true, name = "l2cap-tx") { writeCaptureFrames(client, epoch) }
+        readRemoteFrames(client)
         detachClientSocket(client)
         if (running && !torn) emitLinkLost("Guest disconnected")
     }
 
-    // Drain frames until the guest drops or we tear down. #20 proves the wire
-    // format crosses L2CAP — decode + bounds-check (landmine #12); epoch/seq
-    // gating + the jitter buffer are the host receive path (#23).
-    private fun readFrames(
-        client: BluetoothSocket,
-        peer: String,
-    ) {
+    // Drain frames until the guest drops or we tear down. Native owns decode,
+    // epoch/SeqFilter gating, jitter buffering, and Oboe output (#23).
+    private fun readRemoteFrames(client: BluetoothSocket) {
         val input = DataInputStream(client.inputStream)
         val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
+        val rxMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
         var received = 0L
+        var accepted = 0L
         try {
-            while (running && !torn) {
+            while (isClientCurrent(client)) {
+                val readStartMs = SystemClock.elapsedRealtime()
                 input.readFully(buf)
-                if (!running || torn) return
+                val readMs = SystemClock.elapsedRealtime() - readStartMs
+                if (!isClientCurrent(client)) return
                 received += 1
-                reportFrame(buf, received, peer)
+                rxMeter.onSample(1, buf.size, readMs)?.let { Log.i(TAG, "RXNET $it") }
+                if (NativeCore.pushHostFrame(buf)) {
+                    accepted += 1
+                    reportAcceptedFrame(accepted)
+                    continue
+                }
+                Log.w(TAG, "RADIO l2cap rx dropped frame #$received")
             }
         } catch (e: IOException) {
-            if (running && !torn) Log.w(TAG, "RADIO l2cap rx ended: ${e.message}")
+            if (isClientCurrent(client)) Log.w(TAG, "RADIO l2cap rx ended: ${e.message}")
         }
     }
 
-    private fun reportFrame(
-        buf: ByteArray,
-        received: Long,
-        peer: String,
+    private fun writeCaptureFrames(
+        client: BluetoothSocket,
+        epoch: Long,
     ) {
-        val frame = VoiceFrame.decode(buf)
-        if (frame == null) {
-            Log.w(TAG, "RADIO l2cap rx dropped malformed frame #$received")
-            return
+        val output = client.outputStream
+        val txMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
+        var lastFrameAtMs = SystemClock.elapsedRealtime()
+        try {
+            while (isClientCurrent(client)) {
+                val bundleFrames = bundleFramesForRoute()
+                val bundle = NativeCore.takeGuestBundle(bundleFrames, TX_FRAME_TIMEOUT_MS)
+                if (bundle == null) {
+                    lastFrameAtMs = recoverCaptureIfStalled(epoch, lastFrameAtMs, client) ?: return
+                    continue
+                }
+                lastFrameAtMs = SystemClock.elapsedRealtime()
+                val writeMs = writeBundle(output, bundle)
+                txMeter.onSample(bundleFrames, bundle.size, writeMs)?.let { Log.i(TAG, "TXNET epoch=$epoch $it") }
+            }
+        } catch (e: IOException) {
+            if (isClientCurrent(client)) {
+                Log.w(TAG, "RADIO l2cap tx ended: ${e.message}")
+                emitLinkLost("Guest disconnected")
+            }
+        } finally {
+            stopCapture()
+            detachClientSocket(client)
         }
-        if (!running || torn) return
-        if (received > 1L) return
-        Log.i(TAG, "RADIO l2cap rx frame epoch=${frame.epoch} seq=${frame.seq} (first)")
-        emitLinked(peer)
-        emitStatus("Voice link up — first frame seq=${frame.seq}")
     }
+
+    private fun recoverCaptureIfStalled(
+        epoch: Long,
+        lastFrameAtMs: Long,
+        client: BluetoothSocket,
+    ): Long? {
+        val nowMs = SystemClock.elapsedRealtime()
+        if (nowMs - lastFrameAtMs <= CAPTURE_STALL_RESTART_MS) return lastFrameAtMs
+
+        Log.w(TAG, "AUDIO capture starved — restarting epoch=$epoch")
+        if (restartCapture(epoch)) return SystemClock.elapsedRealtime()
+
+        if (isClientCurrent(client)) emitLinkLost("Audio capture stalled")
+        return null
+    }
+
+    // Smaller packet rate on a radio-sharing BT route (landmine #1): bundle
+    // consecutive frames into one write rather than dropping them — dropping
+    // decimates speech into silence. Native returns the freshest contiguous run,
+    // so the peer plays the bundle gap-free.
+    private fun bundleFramesForRoute(): Int {
+        if (VoiceAudioRoute.isCommunicationRouteDegraded()) return DEGRADED_BUNDLE_FRAMES
+        return 1
+    }
+
+    // One socket write carries a whole bundle of consecutive frames; returns how
+    // long write()+flush() blocked so the meter can spot send backpressure.
+    // IOException propagates to the writer loop and ends the link.
+    private fun writeBundle(
+        output: OutputStream,
+        bundle: ByteArray,
+    ): Long {
+        val startMs = SystemClock.elapsedRealtime()
+        output.write(bundle)
+        output.flush()
+        return SystemClock.elapsedRealtime() - startMs
+    }
+
+    private fun reportAcceptedFrame(accepted: Long) {
+        if (!running || torn) return
+        if (accepted > 1L) return
+        Log.i(TAG, "RADIO l2cap rx accepted first voice frame")
+        emitStatus("Voice link up — first remote audio frame")
+    }
+
+    private fun isClientCurrent(client: BluetoothSocket): Boolean = running && !torn && clientSocket === client
 
     private fun publishClientSocket(client: BluetoothSocket): Boolean =
         synchronized(l2capLock) {
@@ -412,7 +609,7 @@ internal class HostRadio(
         }
 
     private fun emitLinked(peer: String) {
-        onEvent(RadioEvent.Linked(peer = peer, psm = psm))
+        onEvent(RadioEvent.Linked(peer = peer, psm = psm, wireEpoch = wireEpoch))
     }
 
     private fun emitAdvertising(text: String) {
@@ -434,5 +631,12 @@ internal class HostRadio(
     companion object {
         private const val TAG = "INTERCOM"
         private const val UNKNOWN_PEER = "unknown"
+        private const val MAX_WIRE_EPOCH = 4_294_967_295L // 2^32 - 1: max u32 wire epoch
+        private const val HOST_LINK_PARAMS_BYTES = 2 * Integer.BYTES
+        private const val EPOCH_WAIT_MS = 100L
+        private const val TX_FRAME_TIMEOUT_MS = 100
+        private const val DEGRADED_BUNDLE_FRAMES = 2
+        private const val TX_NET_WINDOW_MS = 2_000L
+        private const val CAPTURE_STALL_RESTART_MS = 2_000L
     }
 }

@@ -39,6 +39,23 @@ class SessionControllerTest {
     }
 
     @Test
+    fun linkedEventWireEpochDrivesEndpointAudioEpoch() {
+        val fixture = Fixture()
+
+        fixture.controller.startGuest()
+        fixture.guest.event(
+            RadioEvent.Linked(
+                peer = "AA:BB:CC:DD:EE:FF",
+                psm = 177,
+                wireEpoch = 0xA1B2_C3D4L,
+            ),
+        )
+
+        assertEquals(listOf(0xA1B2_C3D4L), fixture.guest.begunEpochs)
+        assertEquals(1L, (fixture.controller.state as LinkState.Linked).epoch.id)
+    }
+
+    @Test
     fun staleGuestEventDoesNotSurviveRoleSwap() {
         val fixture = Fixture()
         fixture.controller.startGuest()
@@ -71,6 +88,7 @@ class SessionControllerTest {
         val linked = fixture.controller.state as LinkState.Linked
         assertEquals(LinkRole.Host, linked.role)
         assertEquals(177, linked.psm)
+        assertEquals(listOf(1L), fixture.host.begunEpochs)
 
         fixture.controller.stopHost()
         assertTrue(fixture.controller.state is LinkState.Idle)
@@ -110,6 +128,7 @@ class SessionControllerTest {
         val linked = fixture.controller.state as LinkState.Linked
         assertEquals(LinkRole.Guest, linked.role)
         assertEquals(199, linked.psm)
+        assertEquals(listOf(1L), fixture.guest.begunEpochs)
 
         fixture.guest.event(RadioEvent.LinkLost("Host disconnected"))
         assertTrue(fixture.controller.state is LinkState.Idle)
@@ -155,10 +174,15 @@ internal class FakeRadioEndpoint(
     var stopCount = 0
         private set
     var startResult = true
+    val begunEpochs = mutableListOf<Long>()
 
     override fun start(): Boolean {
         startCount += 1
         return startResult
+    }
+
+    override fun beginEpoch(epochId: Long) {
+        begunEpochs += epochId
     }
 
     override fun stop() {
