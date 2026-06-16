@@ -325,13 +325,17 @@ internal class HostRadio(
     private fun readRemoteFrames(client: BluetoothSocket) {
         val input = DataInputStream(client.inputStream)
         val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
+        val rxMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
         var received = 0L
         var accepted = 0L
         try {
             while (isClientCurrent(client)) {
+                val readStartMs = SystemClock.elapsedRealtime()
                 input.readFully(buf)
+                val readMs = SystemClock.elapsedRealtime() - readStartMs
                 if (!isClientCurrent(client)) return
                 received += 1
+                rxMeter.onSample(1, buf.size, readMs)?.let { Log.i(TAG, "RXNET $it") }
                 if (NativeCore.pushHostFrame(buf)) {
                     accepted += 1
                     reportAcceptedFrame(accepted)
@@ -349,8 +353,8 @@ internal class HostRadio(
         epoch: Long,
     ) {
         val output = client.outputStream
+        val txMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
         var lastFrameAtMs = SystemClock.elapsedRealtime()
-        var writes = 0L
         try {
             while (isClientCurrent(client)) {
                 val bundleFrames = bundleFramesForRoute()
@@ -360,8 +364,8 @@ internal class HostRadio(
                     continue
                 }
                 lastFrameAtMs = SystemClock.elapsedRealtime()
-                writes += 1
-                writeBundle(output, bundle, epoch, bundleFrames, writes)
+                val writeMs = writeBundle(output, bundle)
+                txMeter.onSample(bundleFrames, bundle.size, writeMs)?.let { Log.i(TAG, "TXNET epoch=$epoch $it") }
             }
         } catch (e: IOException) {
             if (isClientCurrent(client)) {
@@ -398,25 +402,17 @@ internal class HostRadio(
         return 1
     }
 
-    // One socket write carries a whole bundle of consecutive frames. Timing the
-    // write surfaces socket backpressure (lastWriteMs); IOException ends the link.
+    // One socket write carries a whole bundle of consecutive frames; returns how
+    // long write()+flush() blocked so the meter can spot send backpressure.
+    // IOException propagates to the writer loop and ends the link.
     private fun writeBundle(
         output: OutputStream,
         bundle: ByteArray,
-        epoch: Long,
-        bundleFrames: Int,
-        writes: Long,
-    ) {
+    ): Long {
         val startMs = SystemClock.elapsedRealtime()
         output.write(bundle)
         output.flush()
-        val writeMs = SystemClock.elapsedRealtime() - startMs
-        if (writes % TX_LOG_EVERY_WRITES != 0L) return
-        Log.i(
-            TAG,
-            "TXBUNDLE epoch=$epoch writes=$writes bundleFrames=$bundleFrames " +
-                "bytes=${bundle.size} lastWriteMs=$writeMs",
-        )
+        return SystemClock.elapsedRealtime() - startMs
     }
 
     private fun reportAcceptedFrame(accepted: Long) {
@@ -640,7 +636,7 @@ internal class HostRadio(
         private const val EPOCH_WAIT_MS = 100L
         private const val TX_FRAME_TIMEOUT_MS = 100
         private const val DEGRADED_BUNDLE_FRAMES = 2
-        private const val TX_LOG_EVERY_WRITES = 50L
+        private const val TX_NET_WINDOW_MS = 2_000L
         private const val CAPTURE_STALL_RESTART_MS = 2_000L
     }
 }
