@@ -17,6 +17,7 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.elodin.intercom.NativeCore
 import com.elodin.intercom.audio.VoiceAudioRoute
@@ -68,6 +69,7 @@ internal class HostRadio(
     private var linkedEpoch: Long? = null
     private var psmBytes: ByteArray = ByteArray(0)
     private var psm: Int = 0
+    private var wireEpoch: Long = 0
     private val connectedGuests = CopyOnWriteArraySet<BluetoothDevice>()
 
     @Volatile
@@ -91,10 +93,12 @@ internal class HostRadio(
         running = true
         val nextPsm = listenForL2cap(adapter) ?: return false
         psm = nextPsm
-        val buf = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN)
+        wireEpoch = nextWireEpoch()
+        val buf = ByteBuffer.allocate(HOST_LINK_PARAMS_BYTES).order(ByteOrder.LITTLE_ENDIAN)
         buf.putInt(psm)
+        buf.putInt(wireEpoch.toInt())
         psmBytes = buf.array()
-        Log.i(TAG, "RADIO l2cap listening psm=$psm")
+        Log.i(TAG, "RADIO l2cap listening psm=$psm wireEpoch=$wireEpoch")
         emitStatus("Starting host — PSM $psm")
         if (startGattServer(manager) && startAdvertising(adapter)) return true
 
@@ -158,8 +162,15 @@ internal class HostRadio(
         gattServer = null
         clientSocket = null
         serverSocket = null
+        wireEpoch = 0
         Log.i(TAG, "RADIO host stopped")
         if (reportStopped) emitStatus("Stopped")
+    }
+
+    private fun nextWireEpoch(): Long {
+        val epoch = SystemClock.elapsedRealtimeNanos() and MAX_WIRE_EPOCH
+        if (epoch != 0L) return epoch
+        return psm.toLong() and MAX_WIRE_EPOCH
     }
 
     private fun startPlayout(epochId: Long): Boolean {
@@ -227,7 +238,7 @@ internal class HostRadio(
             return
         }
         val address = client.remoteDevice?.address ?: UNKNOWN_PEER
-        Log.i(TAG, "RADIO l2cap accepted $address")
+        Log.i(TAG, "RADIO l2cap accepted $address wireEpoch=$wireEpoch")
         emitLinked(address)
         val epoch = awaitLinkedEpoch()
         if (epoch == null) {
@@ -457,7 +468,7 @@ internal class HostRadio(
         }
 
     private fun emitLinked(peer: String) {
-        onEvent(RadioEvent.Linked(peer = peer, psm = psm))
+        onEvent(RadioEvent.Linked(peer = peer, psm = psm, wireEpoch = wireEpoch))
     }
 
     private fun emitAdvertising(text: String) {
@@ -480,6 +491,7 @@ internal class HostRadio(
         private const val TAG = "INTERCOM"
         private const val UNKNOWN_PEER = "unknown"
         private const val MAX_WIRE_EPOCH = 0xFFFF_FFFFL
+        private const val HOST_LINK_PARAMS_BYTES = 2 * Integer.BYTES
         private const val EPOCH_WAIT_MS = 100L
     }
 }

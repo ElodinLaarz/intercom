@@ -114,9 +114,13 @@ internal class SessionController(
 
         epochCounter += 1
         val epoch = Epoch(epochCounter, endpoint.endpoint)
+        val wireEpoch = event.wireEpoch.takeIf { it > 0 } ?: epoch.id
         activeEpoch = epoch
-        val detail = "Linked epoch=${epoch.id} peer=${event.peer} psm=${event.psm}"
-        logger("SESSION linked epoch=${epoch.id} role=${endpoint.role.label()} peer=${event.peer} psm=${event.psm}")
+        val detail = "Linked epoch=${epoch.id} wireEpoch=$wireEpoch peer=${event.peer} psm=${event.psm}"
+        logger(
+            "SESSION linked epoch=${epoch.id} wireEpoch=$wireEpoch role=${endpoint.role.label()} " +
+                "peer=${event.peer} psm=${event.psm}",
+        )
         setState(
             LinkState.Linked(
                 epoch = epoch,
@@ -126,7 +130,7 @@ internal class SessionController(
                 detail = detail,
             ),
         )
-        endpoint.endpoint.beginEpoch(epoch.id)
+        endpoint.endpoint.beginEpoch(wireEpoch)
     }
 
     private fun onStatus(text: String) {

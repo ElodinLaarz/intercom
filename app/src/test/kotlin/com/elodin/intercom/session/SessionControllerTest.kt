@@ -39,6 +39,23 @@ class SessionControllerTest {
     }
 
     @Test
+    fun linkedEventWireEpochDrivesEndpointAudioEpoch() {
+        val fixture = Fixture()
+
+        fixture.controller.startGuest()
+        fixture.guest.event(
+            RadioEvent.Linked(
+                peer = "AA:BB:CC:DD:EE:FF",
+                psm = 177,
+                wireEpoch = 0xA1B2_C3D4L,
+            ),
+        )
+
+        assertEquals(listOf(0xA1B2_C3D4L), fixture.guest.begunEpochs)
+        assertEquals(1L, (fixture.controller.state as LinkState.Linked).epoch.id)
+    }
+
+    @Test
     fun staleGuestEventDoesNotSurviveRoleSwap() {
         val fixture = Fixture()
         fixture.controller.startGuest()

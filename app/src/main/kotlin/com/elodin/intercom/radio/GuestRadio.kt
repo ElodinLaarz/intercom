@@ -123,9 +123,24 @@ internal class GuestRadio(
         gatt = nextGatt
     }
 
-    private fun parsePsm(value: ByteArray?): Int {
-        if (value == null || value.size < Integer.BYTES) return -1
-        return ByteBuffer.wrap(value).order(ByteOrder.LITTLE_ENDIAN).int
+    private data class HostLinkParams(
+        val psm: Int,
+        val wireEpoch: Long,
+    )
+
+    private fun parseHostLinkParams(value: ByteArray?): HostLinkParams? {
+        if (value == null || value.size < Integer.BYTES) return null
+
+        val bb = ByteBuffer.wrap(value).order(ByteOrder.LITTLE_ENDIAN)
+        val psm = bb.int
+        val wireEpoch =
+            if (value.size >= HOST_LINK_PARAMS_BYTES) {
+                bb.int.toLong() and MAX_WIRE_EPOCH
+            } else {
+                psm.toLong() and MAX_WIRE_EPOCH
+            }
+        if (psm <= 0 || wireEpoch == 0L) return null
+        return HostLinkParams(psm = psm, wireEpoch = wireEpoch)
     }
 
     private fun beginScan(
@@ -336,7 +351,7 @@ internal class GuestRadio(
             linkedEpoch
         }
 
-    private fun openL2cap(psm: Int) {
+    private fun openL2cap(params: HostLinkParams) {
         val device = hostDevice
         if (device == null) {
             fail("No host device for L2CAP")
@@ -347,7 +362,7 @@ internal class GuestRadio(
                 if (!running || torn) return
                 l2capGeneration.incrementAndGet()
             }
-        thread(isDaemon = true, name = "l2cap-connect") { connectLoop(generation, device, psm) }
+        thread(isDaemon = true, name = "l2cap-connect") { connectLoop(generation, device, params) }
     }
 
     // Open the CoC to the host's PSM and stream native-produced voice frames
@@ -356,12 +371,12 @@ internal class GuestRadio(
     private fun connectLoop(
         generation: Int,
         device: BluetoothDevice,
-        psm: Int,
+        params: HostLinkParams,
     ) {
         val ladder = BackoffLadder()
         var attempt = 0
         while (isL2capCurrent(generation)) {
-            if (openAndStream(generation, device, psm)) return
+            if (openAndStream(generation, device, params)) return
             val delayMs = ladder.delayBeforeRetryMs(attempt) ?: break
             if (!sleepLadder(delayMs)) return
             attempt += 1
@@ -372,14 +387,14 @@ internal class GuestRadio(
     private fun openAndStream(
         generation: Int,
         device: BluetoothDevice,
-        psm: Int,
+        params: HostLinkParams,
     ): Boolean {
         var socket: BluetoothSocket? = null
         try {
-            socket = device.createInsecureL2capChannel(psm)
+            socket = device.createInsecureL2capChannel(params.psm)
             if (publishSocketIfCurrent(generation, socket)) {
                 socket.connect()
-                streamAudioIfCurrent(generation, socket, device, psm)
+                streamAudioIfCurrent(generation, socket, device, params)
                 closeAndDetachSocket(socket)
                 return true
             }
@@ -388,7 +403,7 @@ internal class GuestRadio(
         } catch (e: SecurityException) {
             Log.e(TAG, "RADIO l2cap permission failure: ${e.message}")
         } catch (e: IllegalArgumentException) {
-            Log.e(TAG, "RADIO l2cap rejected PSM $psm: ${e.message}")
+            Log.e(TAG, "RADIO l2cap rejected PSM ${params.psm}: ${e.message}")
         }
         closeAndDetachSocket(socket)
         return false
@@ -398,11 +413,11 @@ internal class GuestRadio(
         generation: Int,
         socket: BluetoothSocket,
         device: BluetoothDevice,
-        psm: Int,
+        params: HostLinkParams,
     ) {
         if (!isL2capCurrent(generation)) return
-        Log.i(TAG, "RADIO l2cap tx connected ${device.address}")
-        emitLinked(device.address, psm)
+        Log.i(TAG, "RADIO l2cap tx connected ${device.address} wireEpoch=${params.wireEpoch}")
+        emitLinked(device.address, params)
         val epoch = awaitLinkedEpoch(generation) ?: return
         if (!isL2capCurrent(generation)) return
 
@@ -657,7 +672,7 @@ internal class GuestRadio(
         status: Int,
     ) {
         if (torn) return
-        val psm = parsePsm(value)
+        val params = parseHostLinkParams(value)
         if (uuid != psmCharUuid) {
             fail("Unexpected GATT characteristic")
             return
@@ -666,20 +681,20 @@ internal class GuestRadio(
             fail("PSM read failed (status $status)")
             return
         }
-        if (psm <= 0) {
+        if (params == null) {
             fail("Invalid host PSM")
             return
         }
-        Log.i(TAG, "RADIO gatt read PSM=$psm status=$status")
-        emitStatus("Host PSM $psm — opening voice link…")
-        openL2cap(psm)
+        Log.i(TAG, "RADIO gatt read PSM=${params.psm} wireEpoch=${params.wireEpoch} status=$status")
+        emitStatus("Host PSM ${params.psm} — opening voice link…")
+        openL2cap(params)
     }
 
     private fun emitLinked(
         peer: String,
-        psm: Int,
+        params: HostLinkParams,
     ) {
-        onEvent(RadioEvent.Linked(peer = peer, psm = psm))
+        onEvent(RadioEvent.Linked(peer = peer, psm = params.psm, wireEpoch = params.wireEpoch))
     }
 
     private fun emitFound(
@@ -706,6 +721,7 @@ internal class GuestRadio(
         private const val MTU = 517
 
         private const val MAX_WIRE_EPOCH = 0xFFFF_FFFFL
+        private const val HOST_LINK_PARAMS_BYTES = 2 * Integer.BYTES
         private const val EPOCH_WAIT_MS = 100L
         private const val TX_FRAME_TIMEOUT_MS = 100
         private const val CAPTURE_STALL_RESTART_MS = 2_000L
