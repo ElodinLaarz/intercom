@@ -12,12 +12,14 @@ using FrameBytes = std::array<std::uint8_t, proto::kVoiceFrameBytes>;
 
 class TxEngine {
  public:
-  explicit TxEngine(std::uint32_t epoch);
+  explicit TxEngine(std::uint32_t epoch, std::uint32_t initialSeq = 0);
   ~TxEngine();
 
   bool start();
   void stop();
   bool takeFrame(FrameBytes& out, int timeoutMs);
+  std::uint32_t epoch() const;
+  std::uint32_t nextSequence() const;
 
   TxEngine(const TxEngine&) = delete;
   TxEngine& operator=(const TxEngine&) = delete;

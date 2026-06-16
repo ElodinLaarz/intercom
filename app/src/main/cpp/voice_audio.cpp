@@ -122,11 +122,13 @@ struct TxEngine::Impl {
     Impl& engine_;
   };
 
-  explicit Impl(std::uint32_t epoch) : epoch(epoch), callback(*this) {}
+  Impl(std::uint32_t epoch, std::uint32_t initialSeq)
+      : epoch(epoch), nextSeq(initialSeq), callback(*this) {}
 
   bool start();
   void stop();
   bool takeFrame(FrameBytes& out, int timeoutMs);
+  std::uint32_t nextSequence() const;
   oboe::DataCallbackResult onAudioReady(void* audioData, int32_t numFrames);
 
   void encodeSamples(const std::int16_t* samples, int32_t numFrames);
@@ -134,7 +136,7 @@ struct TxEngine::Impl {
 
   const std::uint32_t epoch;
   std::atomic<bool> stopping{false};
-  std::uint32_t nextSeq = 0;
+  std::atomic<std::uint32_t> nextSeq{0};
   ImaState encoder{};
   std::array<std::int16_t, proto::kVoiceFrameSamples> pcm{};
   int pcmFill = 0;
@@ -171,6 +173,7 @@ struct RxEngine::Impl {
   void restartOutputStream();
   void render(std::int16_t* out, int32_t numFrames);
   void prepareNextPcmFrame();
+  void trimLateFrames();
   void fillCurrentWithSilence();
 
   SeqFilter seqFilter;
@@ -178,6 +181,7 @@ struct RxEngine::Impl {
   std::atomic<std::uint64_t> accepted{0};
   std::atomic<std::uint64_t> rejected{0};
   std::atomic<std::uint64_t> lost{0};
+  std::atomic<std::uint64_t> lateDrops{0};
   std::atomic<std::uint64_t> underruns{0};
   std::atomic<std::uint64_t> decodedFrames{0};
   std::atomic<int> decodedPeak{0};
@@ -224,7 +228,8 @@ void stopStream(std::shared_ptr<oboe::AudioStream>& stream) {
 
 }  // namespace
 
-TxEngine::TxEngine(std::uint32_t epoch) : impl_(new Impl(epoch)) {}
+TxEngine::TxEngine(std::uint32_t epoch, std::uint32_t initialSeq)
+    : impl_(new Impl(epoch, initialSeq)) {}
 
 TxEngine::~TxEngine() {
   stop();
@@ -241,6 +246,18 @@ void TxEngine::stop() {
 
 bool TxEngine::takeFrame(FrameBytes& out, int timeoutMs) {
   return impl_->takeFrame(out, timeoutMs);
+}
+
+std::uint32_t TxEngine::epoch() const {
+  return impl_->epoch;
+}
+
+std::uint32_t TxEngine::nextSequence() const {
+  return impl_->nextSequence();
+}
+
+std::uint32_t TxEngine::Impl::nextSequence() const {
+  return nextSeq.load(std::memory_order_relaxed);
 }
 
 bool TxEngine::Impl::start() {
@@ -333,7 +350,7 @@ void TxEngine::Impl::encodeSamples(const std::int16_t* samples,
 void TxEngine::Impl::emitFrame() {
   VoiceFrame frame;
   frame.epoch = epoch;
-  frame.seq = nextSeq++;
+  frame.seq = nextSeq.fetch_add(1, std::memory_order_relaxed);
   frame.predSample = encoder.predSample;
   frame.stepIndex = encoder.stepIndex;
   const int peak = peakAbs(pcm.data(), proto::kVoiceFrameSamples);
@@ -448,10 +465,12 @@ bool RxEngine::Impl::pushFrame(const std::uint8_t* data, std::size_t len) {
   watchOutputProgress(acceptedCount);
   if (acceptedCount % kDiagEveryFrames == 0) {
     LOGI(
-        "DIAG epoch=%u rxSeq=%u lost=%llu qDepth=%zu jitterMs=%zu "
-        "underruns=%llu rejected=%llu rxPeak=%d decoded=%llu",
+        "DIAG epoch=%u rxSeq=%u lost=%llu lateDrops=%llu qDepth=%zu "
+        "jitterMs=%zu underruns=%llu rejected=%llu rxPeak=%d decoded=%llu",
         seqFilter.epoch(), parsed->seq,
         static_cast<unsigned long long>(lost.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            lateDrops.load(std::memory_order_relaxed)),
         jitter.depth(), jitter.depth() * proto::kVoiceFrameMs,
         static_cast<unsigned long long>(
             underruns.load(std::memory_order_relaxed)),
@@ -542,6 +561,8 @@ void RxEngine::Impl::prepareNextPcmFrame() {
     playoutStarted = true;
   }
 
+  trimLateFrames();
+
   PlayoutFrame item;
   if (!jitter.pop(item)) {
     playoutStarted = false;
@@ -563,6 +584,17 @@ void RxEngine::Impl::prepareNextPcmFrame() {
                     std::memory_order_relaxed);
   decodedFrames.fetch_add(1, std::memory_order_relaxed);
   currentIndex = 0;
+}
+
+void RxEngine::Impl::trimLateFrames() {
+  std::uint64_t dropped = 0;
+  PlayoutFrame skipped;
+  while (jitter.depth() > kJitterTargetFrames && jitter.pop(skipped)) {
+    dropped += 1;
+  }
+  if (dropped == 0) return;
+
+  lateDrops.fetch_add(dropped, std::memory_order_relaxed);
 }
 
 void RxEngine::Impl::fillCurrentWithSilence() {
