@@ -409,17 +409,24 @@ internal class GuestRadio(
         Log.i(TAG, "RADIO l2cap tx audio epoch=$epoch")
         emitStatus("Voice link up — sending audio")
         thread(isDaemon = true, name = "l2cap-watch") { watchForClose(generation, socket) }
-        writeCaptureFrames(generation, socket)
+        writeCaptureFrames(generation, socket, epoch)
     }
 
     private fun writeCaptureFrames(
         generation: Int,
         socket: BluetoothSocket,
+        epoch: Long,
     ) {
         val output = socket.outputStream
+        var lastFrameAtMs = SystemClock.elapsedRealtime()
         try {
             while (isL2capCurrent(generation)) {
-                val frame = NativeCore.takeGuestFrame(TX_FRAME_TIMEOUT_MS) ?: continue
+                val frame = NativeCore.takeGuestFrame(TX_FRAME_TIMEOUT_MS)
+                if (frame == null) {
+                    lastFrameAtMs = recoverCaptureIfStalled(epoch, lastFrameAtMs) ?: return
+                    continue
+                }
+                lastFrameAtMs = SystemClock.elapsedRealtime()
                 output.write(frame)
                 output.flush()
             }
@@ -432,6 +439,26 @@ internal class GuestRadio(
             stopCapture()
             closeAndDetachSocket(socket)
         }
+    }
+
+    private fun recoverCaptureIfStalled(
+        epoch: Long,
+        lastFrameAtMs: Long,
+    ): Long? {
+        val nowMs = SystemClock.elapsedRealtime()
+        if (nowMs - lastFrameAtMs <= CAPTURE_STALL_RESTART_MS) return lastFrameAtMs
+
+        Log.w(TAG, "AUDIO capture starved — restarting epoch=$epoch")
+        if (restartCapture(epoch)) return SystemClock.elapsedRealtime()
+
+        emitLinkLost("Audio capture stalled")
+        return null
+    }
+
+    private fun restartCapture(epochId: Long): Boolean {
+        NativeCore.stopGuestCapture()
+        VoiceAudioRoute.enterCommunication(context)
+        return NativeCore.startGuestCapture(epochId)
     }
 
     // One-way M1: the guest never receives audio, but it must still notice the
@@ -681,6 +708,7 @@ internal class GuestRadio(
         private const val MAX_WIRE_EPOCH = 0xFFFF_FFFFL
         private const val EPOCH_WAIT_MS = 100L
         private const val TX_FRAME_TIMEOUT_MS = 100
+        private const val CAPTURE_STALL_RESTART_MS = 2_000L
         private const val SCAN_STATUS = "Scanning for host…"
         private const val SCAN_RETRY_MS = 750L
         private const val SCAN_REFRESH_MS = 10_000L

@@ -9,7 +9,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 
@@ -25,6 +27,7 @@ namespace intercore::audio {
 namespace {
 
 constexpr int kJitterTargetFrames = 3;
+constexpr std::uint32_t kDiagEveryFrames = 100;  // 2 s at 50 fps.
 constexpr std::size_t kQueueSlots = 17;  // 16 usable SPSC slots.
 constexpr std::uint32_t kMaxSilenceFillFrames = 3;
 
@@ -86,6 +89,24 @@ struct PlayoutFrame {
   }
 };
 
+int peakAbs(const std::int16_t* samples, int count) {
+  int peak = 0;
+  for (int i = 0; i < count; ++i) {
+    const int sample = samples[i];
+    const int mag =
+        sample == std::numeric_limits<std::int16_t>::min() ? 32768
+                                                           : std::abs(sample);
+    peak = std::max(peak, mag);
+  }
+  return peak;
+}
+
+struct TxPacket {
+  FrameBytes bytes{};
+  std::uint32_t seq = 0;
+  int peak = 0;
+};
+
 }  // namespace
 
 struct TxEngine::Impl {
@@ -116,7 +137,7 @@ struct TxEngine::Impl {
   ImaState encoder{};
   std::array<std::int16_t, proto::kVoiceFrameSamples> pcm{};
   int pcmFill = 0;
-  SpscQueue<FrameBytes, kQueueSlots> queue;
+  SpscQueue<TxPacket, kQueueSlots> queue;
   std::mutex waitMutex;
   std::condition_variable frameReady;
   std::shared_ptr<oboe::AudioStream> stream;
@@ -152,6 +173,8 @@ struct RxEngine::Impl {
   std::atomic<std::uint64_t> rejected{0};
   std::atomic<std::uint64_t> lost{0};
   std::atomic<std::uint64_t> underruns{0};
+  std::atomic<std::uint64_t> decodedFrames{0};
+  std::atomic<int> decodedPeak{0};
   SpscQueue<PlayoutFrame, kQueueSlots> jitter;
   std::array<std::int16_t, proto::kVoiceFrameSamples> currentPcm{};
   int currentIndex = proto::kVoiceFrameSamples;
@@ -245,7 +268,16 @@ void TxEngine::Impl::stop() {
 }
 
 bool TxEngine::Impl::takeFrame(FrameBytes& out, int timeoutMs) {
-  if (queue.pop(out)) return true;
+  TxPacket packet;
+  if (queue.pop(packet)) {
+    out = packet.bytes;
+    if (packet.seq % kDiagEveryFrames == 0) {
+      LOGI("DIAG epoch=%u txSeq=%u txPeak=%d qDepth=%zu drops=%llu", epoch,
+           packet.seq, packet.peak, queue.depth(),
+           static_cast<unsigned long long>(queue.dropped()));
+    }
+    return true;
+  }
   if (stopping.load(std::memory_order_acquire)) return false;
 
   std::unique_lock<std::mutex> lock(waitMutex);
@@ -253,7 +285,15 @@ bool TxEngine::Impl::takeFrame(FrameBytes& out, int timeoutMs) {
     return stopping.load(std::memory_order_acquire) || queue.depth() > 0;
   });
   if (stopping.load(std::memory_order_acquire)) return false;
-  return queue.pop(out);
+  if (!queue.pop(packet)) return false;
+
+  out = packet.bytes;
+  if (packet.seq % kDiagEveryFrames == 0) {
+    LOGI("DIAG epoch=%u txSeq=%u txPeak=%d qDepth=%zu drops=%llu", epoch,
+         packet.seq, packet.peak, queue.depth(),
+         static_cast<unsigned long long>(queue.dropped()));
+  }
+  return true;
 }
 
 oboe::DataCallbackResult TxEngine::Impl::onAudioReady(void* audioData,
@@ -286,11 +326,14 @@ void TxEngine::Impl::emitFrame() {
   frame.seq = nextSeq++;
   frame.predSample = encoder.predSample;
   frame.stepIndex = encoder.stepIndex;
+  const int peak = peakAbs(pcm.data(), proto::kVoiceFrameSamples);
   imaEncodeBlock(encoder, pcm.data(), frame.adpcm.data());
 
-  FrameBytes bytes{};
-  serializeVoiceFrame(frame, bytes.data());
-  if (queue.push(bytes)) {
+  TxPacket packet;
+  packet.seq = frame.seq;
+  packet.peak = peak;
+  serializeVoiceFrame(frame, packet.bytes.data());
+  if (queue.push(packet)) {
     frameReady.notify_one();
   }
 }
@@ -375,8 +418,24 @@ bool RxEngine::Impl::pushFrame(const std::uint8_t* data, std::size_t len) {
     }
   }
 
-  accepted.fetch_add(1, std::memory_order_relaxed);
+  const std::uint64_t acceptedCount =
+      accepted.fetch_add(1, std::memory_order_relaxed) + 1;
   jitter.push(PlayoutFrame::voiceFrame(*parsed));
+  if (acceptedCount % kDiagEveryFrames == 0) {
+    LOGI(
+        "DIAG epoch=%u rxSeq=%u lost=%llu qDepth=%zu jitterMs=%zu "
+        "underruns=%llu rejected=%llu rxPeak=%d decoded=%llu",
+        seqFilter.epoch(), parsed->seq,
+        static_cast<unsigned long long>(lost.load(std::memory_order_relaxed)),
+        jitter.depth(), jitter.depth() * proto::kVoiceFrameMs,
+        static_cast<unsigned long long>(
+            underruns.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            rejected.load(std::memory_order_relaxed)),
+        decodedPeak.load(std::memory_order_relaxed),
+        static_cast<unsigned long long>(
+            decodedFrames.load(std::memory_order_relaxed)));
+  }
   return true;
 }
 
@@ -433,6 +492,9 @@ void RxEngine::Impl::prepareNextPcmFrame() {
   seed.predSample = item.frame.predSample;
   seed.stepIndex = item.frame.stepIndex;
   imaDecodeBlock(seed, item.frame.adpcm.data(), currentPcm.data());
+  decodedPeak.store(peakAbs(currentPcm.data(), proto::kVoiceFrameSamples),
+                    std::memory_order_relaxed);
+  decodedFrames.fetch_add(1, std::memory_order_relaxed);
   currentIndex = 0;
 }
 
