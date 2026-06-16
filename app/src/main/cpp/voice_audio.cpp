@@ -131,12 +131,15 @@ struct TxEngine::Impl {
   std::uint32_t nextSequence() const;
   oboe::DataCallbackResult onAudioReady(void* audioData, int32_t numFrames);
 
+  bool popLatestPacket(TxPacket& packet);
+  void logPacket(const TxPacket& packet) const;
   void encodeSamples(const std::int16_t* samples, int32_t numFrames);
   void emitFrame();
 
   const std::uint32_t epoch;
   std::atomic<bool> stopping{false};
   std::atomic<std::uint32_t> nextSeq{0};
+  std::atomic<std::uint64_t> lateDrops{0};
   ImaState encoder{};
   std::array<std::int16_t, proto::kVoiceFrameSamples> pcm{};
   int pcmFill = 0;
@@ -296,13 +299,9 @@ void TxEngine::Impl::stop() {
 
 bool TxEngine::Impl::takeFrame(FrameBytes& out, int timeoutMs) {
   TxPacket packet;
-  if (queue.pop(packet)) {
+  if (popLatestPacket(packet)) {
     out = packet.bytes;
-    if (packet.seq % kDiagEveryFrames == 0) {
-      LOGI("DIAG epoch=%u txSeq=%u txPeak=%d qDepth=%zu drops=%llu", epoch,
-           packet.seq, packet.peak, queue.depth(),
-           static_cast<unsigned long long>(queue.dropped()));
-    }
+    logPacket(packet);
     return true;
   }
   if (stopping.load(std::memory_order_acquire)) return false;
@@ -312,15 +311,37 @@ bool TxEngine::Impl::takeFrame(FrameBytes& out, int timeoutMs) {
     return stopping.load(std::memory_order_acquire) || queue.depth() > 0;
   });
   if (stopping.load(std::memory_order_acquire)) return false;
-  if (!queue.pop(packet)) return false;
+  if (!popLatestPacket(packet)) return false;
 
   out = packet.bytes;
-  if (packet.seq % kDiagEveryFrames == 0) {
-    LOGI("DIAG epoch=%u txSeq=%u txPeak=%d qDepth=%zu drops=%llu", epoch,
-         packet.seq, packet.peak, queue.depth(),
-         static_cast<unsigned long long>(queue.dropped()));
+  logPacket(packet);
+  return true;
+}
+
+bool TxEngine::Impl::popLatestPacket(TxPacket& packet) {
+  if (!queue.pop(packet)) return false;
+
+  std::uint64_t skipped = 0;
+  TxPacket newer;
+  while (queue.pop(newer)) {
+    packet = newer;
+    skipped += 1;
+  }
+  if (skipped > 0) {
+    lateDrops.fetch_add(skipped, std::memory_order_relaxed);
   }
   return true;
+}
+
+void TxEngine::Impl::logPacket(const TxPacket& packet) const {
+  if (packet.seq % kDiagEveryFrames == 0) {
+    LOGI(
+        "DIAG epoch=%u txSeq=%u txPeak=%d qDepth=%zu drops=%llu lateDrops=%llu",
+        epoch, packet.seq, packet.peak, queue.depth(),
+        static_cast<unsigned long long>(queue.dropped()),
+        static_cast<unsigned long long>(
+            lateDrops.load(std::memory_order_relaxed)));
+  }
 }
 
 oboe::DataCallbackResult TxEngine::Impl::onAudioReady(void* audioData,
