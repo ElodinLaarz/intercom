@@ -64,7 +64,7 @@ Java_com_elodin_intercom_NativeCore_startGuestCapture(JNIEnv*, jobject,
     g_tx = engine;
   }
   if (old) old->stop();
-  LOGI("AUDIO guest capture started epoch=%u", wireEpoch(epoch));
+  LOGI("AUDIO capture started epoch=%u", wireEpoch(epoch));
   return JNI_TRUE;
 }
 
@@ -99,7 +99,7 @@ Java_com_elodin_intercom_NativeCore_stopGuestCapture(JNIEnv*, jobject) {
   }
   if (engine) {
     engine->stop();
-    LOGI("AUDIO guest capture stopped");
+    LOGI("AUDIO capture stopped");
   }
 }
 
@@ -117,7 +117,7 @@ Java_com_elodin_intercom_NativeCore_startHostPlayout(JNIEnv*, jobject,
     g_rx = engine;
   }
   if (old) old->stop();
-  LOGI("AUDIO host playout ready epoch=%u", wireEpoch(epoch));
+  LOGI("AUDIO playout ready epoch=%u", wireEpoch(epoch));
   return JNI_TRUE;
 }
 
@@ -155,6 +155,6 @@ Java_com_elodin_intercom_NativeCore_stopHostPlayout(JNIEnv*, jobject) {
   }
   if (engine) {
     engine->stop();
-    LOGI("AUDIO host playout stopped");
+    LOGI("AUDIO playout stopped");
   }
 }

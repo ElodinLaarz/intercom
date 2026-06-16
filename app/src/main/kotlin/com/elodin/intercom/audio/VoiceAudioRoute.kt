@@ -11,8 +11,14 @@ import android.util.Log
  * platform communication mode/route requested by the voice path.
  */
 internal object VoiceAudioRoute {
+    private var activeUsers = 0
+
+    @Synchronized
     fun enterCommunication(context: Context) {
         val audio = context.getSystemService(AudioManager::class.java) ?: return
+        activeUsers += 1
+        if (activeUsers > 1) return
+
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
         val device = preferredCommunicationDevice(audio) ?: return
         if (!audio.setCommunicationDevice(device)) {
@@ -20,7 +26,13 @@ internal object VoiceAudioRoute {
         }
     }
 
+    @Synchronized
     fun leaveCommunication(context: Context) {
+        if (activeUsers == 0) return
+
+        activeUsers -= 1
+        if (activeUsers > 0) return
+
         val audio = context.getSystemService(AudioManager::class.java) ?: return
         audio.clearCommunicationDevice()
         audio.mode = AudioManager.MODE_NORMAL

@@ -23,6 +23,7 @@ import com.elodin.intercom.audio.VoiceAudioRoute
 import com.elodin.intercom.proto.Proto
 import com.elodin.intercom.session.RadioEndpoint
 import com.elodin.intercom.session.RadioEvent
+import java.io.DataInputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -61,8 +62,11 @@ internal class GuestRadio(
     private var clientSocket: BluetoothSocket? = null
     private val l2capGeneration = AtomicInteger(0)
     private val l2capLock = Any()
+    private val audioLock = Any()
     private val epochLock = Object()
     private var linkedEpoch: Long? = null
+    private var captureStarted = false
+    private var playoutStarted = false
 
     @Volatile
     private var running = false
@@ -91,12 +95,12 @@ internal class GuestRadio(
 
     override fun beginEpoch(epochId: Long) {
         if (!running || torn) return
-        val started = startCapture(epochId)
+        val started = startAudio(epochId)
         synchronized(epochLock) {
             if (started && running && !torn) linkedEpoch = epochId
             epochLock.notifyAll()
         }
-        if (!started) fail("Audio capture failed")
+        if (!started) fail("Audio start failed")
     }
 
     private fun stop(reportStopped: Boolean) {
@@ -104,7 +108,7 @@ internal class GuestRadio(
         running = false
         scanning = false
         scanGeneration.incrementAndGet()
-        stopCapture()
+        stopAudio()
         stopCurrentScan()
         closeL2cap()
         closeGatt(disconnect = true)
@@ -319,21 +323,84 @@ internal class GuestRadio(
         }
     }
 
-    private fun startCapture(epochId: Long): Boolean {
-        if (epochId !in 0..MAX_WIRE_EPOCH) return false
-        VoiceAudioRoute.enterCommunication(context)
-        if (NativeCore.startGuestCapture(epochId)) return true
+    private fun startAudio(epochId: Long): Boolean {
+        if (!startCapture(epochId)) return false
+        if (startPlayout(epochId)) return true
 
-        VoiceAudioRoute.leaveCommunication(context)
+        stopCapture()
         return false
     }
 
-    private fun stopCapture() {
-        NativeCore.stopGuestCapture()
-        VoiceAudioRoute.leaveCommunication(context)
+    private fun stopAudio() {
+        stopCapture()
+        stopPlayout()
         synchronized(epochLock) {
             linkedEpoch = null
             epochLock.notifyAll()
+        }
+    }
+
+    private fun startCapture(epochId: Long): Boolean =
+        synchronized(audioLock) {
+            if (captureStarted) return@synchronized true
+            if (epochId !in 0..MAX_WIRE_EPOCH) return@synchronized false
+
+            VoiceAudioRoute.enterCommunication(context)
+            if (NativeCore.startGuestCapture(epochId)) {
+                captureStarted = true
+                return@synchronized true
+            }
+
+            VoiceAudioRoute.leaveCommunication(context)
+            false
+        }
+
+    private fun stopCapture() {
+        synchronized(audioLock) {
+            if (!captureStarted) return
+
+            captureStarted = false
+            NativeCore.stopGuestCapture()
+            VoiceAudioRoute.leaveCommunication(context)
+        }
+    }
+
+    private fun startPlayout(epochId: Long): Boolean =
+        synchronized(audioLock) {
+            if (playoutStarted) return@synchronized true
+            if (epochId !in 0..MAX_WIRE_EPOCH) return@synchronized false
+
+            VoiceAudioRoute.enterCommunication(context)
+            if (NativeCore.startHostPlayout(epochId)) {
+                playoutStarted = true
+                return@synchronized true
+            }
+
+            VoiceAudioRoute.leaveCommunication(context)
+            false
+        }
+
+    private fun stopPlayout() {
+        synchronized(audioLock) {
+            if (!playoutStarted) return
+
+            playoutStarted = false
+            NativeCore.stopHostPlayout()
+            VoiceAudioRoute.leaveCommunication(context)
+        }
+    }
+
+    private fun restartCapture(epochId: Long): Boolean {
+        if (epochId !in 0..MAX_WIRE_EPOCH) return false
+        synchronized(audioLock) {
+            if (!captureStarted) return false
+
+            NativeCore.stopGuestCapture()
+            if (NativeCore.startGuestCapture(epochId)) return true
+
+            captureStarted = false
+            VoiceAudioRoute.leaveCommunication(context)
+            return false
         }
     }
 
@@ -365,9 +432,9 @@ internal class GuestRadio(
         thread(isDaemon = true, name = "l2cap-connect") { connectLoop(generation, device, params) }
     }
 
-    // Open the CoC to the host's PSM and stream native-produced voice frames
-    // (guest -> host). Retries on the bounded backoff ladder (landmine #8) only
-    // for pre-link failures; once linked, a disconnect returns the session idle.
+    // Open the CoC to the host's PSM and run duplex voice over one fixed-frame
+    // byte stream. Retries on the bounded backoff ladder (landmine #8) only for
+    // pre-link failures; once linked, a disconnect returns the session idle.
     private fun connectLoop(
         generation: Int,
         device: BluetoothDevice,
@@ -421,9 +488,9 @@ internal class GuestRadio(
         val epoch = awaitLinkedEpoch(generation) ?: return
         if (!isL2capCurrent(generation)) return
 
-        Log.i(TAG, "RADIO l2cap tx audio epoch=$epoch")
-        emitStatus("Voice link up — sending audio")
-        thread(isDaemon = true, name = "l2cap-watch") { watchForClose(generation, socket) }
+        Log.i(TAG, "RADIO l2cap duplex audio epoch=$epoch")
+        emitStatus("Voice link up — duplex audio")
+        thread(isDaemon = true, name = "l2cap-rx") { readRemoteFrames(generation, socket) }
         writeCaptureFrames(generation, socket, epoch)
     }
 
@@ -470,34 +537,43 @@ internal class GuestRadio(
         return null
     }
 
-    private fun restartCapture(epochId: Long): Boolean {
-        NativeCore.stopGuestCapture()
-        VoiceAudioRoute.enterCommunication(context)
-        return NativeCore.startGuestCapture(epochId)
-    }
-
-    // One-way M1: the guest never receives audio, but it must still notice the
-    // host vanishing. Symmetric to the host's readFrames — block on the CoC and
-    // treat EOF/close as the host leaving. GATT-disconnect can't be relied on:
-    // the guest's own open CoC keeps the shared ACL up, so a host-side GATT
-    // cancel never reaches it (rig finding, #20). M2's duplex receive path
-    // replaces this watch with the real decode pipeline.
-    private fun watchForClose(
+    // Drain frames until the host drops or we tear down. Native owns decode,
+    // epoch/SeqFilter gating, jitter buffering, and Oboe output (#23).
+    private fun readRemoteFrames(
         generation: Int,
         socket: BluetoothSocket,
     ) {
-        val input = socket.inputStream
-        val sink = ByteArray(Proto.VOICE_FRAME_BYTES)
+        val input = DataInputStream(socket.inputStream)
+        val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
+        var received = 0L
+        var accepted = 0L
         try {
             while (isL2capCurrent(generation)) {
-                if (input.read(sink) < 0) break
+                input.readFully(buf)
+                if (!isL2capCurrent(generation)) return
+                received += 1
+                if (NativeCore.pushHostFrame(buf)) {
+                    accepted += 1
+                    reportAcceptedFrame(accepted)
+                    continue
+                }
+                Log.w(TAG, "RADIO l2cap rx dropped frame #$received")
             }
         } catch (e: IOException) {
-            Log.w(TAG, "RADIO l2cap watch ended: ${e.message}")
+            if (isL2capCurrent(generation)) Log.w(TAG, "RADIO l2cap rx ended: ${e.message}")
+        } finally {
+            closeAndDetachSocket(socket)
         }
         if (!isL2capCurrent(generation)) return
         Log.w(TAG, "RADIO l2cap host closed — link lost")
         emitLinkLost("Host disconnected")
+    }
+
+    private fun reportAcceptedFrame(accepted: Long) {
+        if (!running || torn) return
+        if (accepted > 1L) return
+        Log.i(TAG, "RADIO l2cap rx accepted first voice frame")
+        emitStatus("Voice link up — first remote audio frame")
     }
 
     private fun sleepLadder(delayMs: Long): Boolean {
