@@ -11,7 +11,7 @@
 //
 // The encoder keeps a CONTINUOUS predictor across frames for quality; the caller
 // snapshots (predSample, stepIndex) into each frame header *before* encoding a
-// 320-sample block, so the decoder is self-contained: it seeds from the header
+// 160-sample block, so the decoder is self-contained: it seeds from the header
 // and decodes that block independent of any other frame. A lost frame therefore
 // costs exactly one 20 ms gap, and the next frame self-heals from its own
 // header. Encode and decode share identical predictor-update math, so a decoder
@@ -114,7 +114,7 @@ inline std::int16_t imaDecodeSample(ImaState& st, std::uint8_t nibble) {
   return st.predSample;
 }
 
-// Encode kVoiceFrameSamples (320) PCM16 samples into kVoiceAdpcmBytes (160)
+// Encode kVoiceFrameSamples (160) PCM16 samples into kVoiceAdpcmBytes (80)
 // bytes — sample 2i in the low nibble, sample 2i+1 in the high nibble. `st` is
 // the CONTINUOUS encoder state (advanced); snapshot it before calling to fill
 // the frame header.
@@ -127,7 +127,7 @@ inline void imaEncodeBlock(ImaState& st, const std::int16_t* pcm,
   }
 }
 
-// Decode kVoiceAdpcmBytes (160) bytes into kVoiceFrameSamples (320) PCM16
+// Decode kVoiceAdpcmBytes (80) bytes into kVoiceFrameSamples (160) PCM16
 // samples. `seed` is taken BY VALUE (the per-frame header snapshot), so decoding
 // is independent of any other frame — self-contained (M1_PLAN.md §2).
 inline void imaDecodeBlock(ImaState seed, const std::uint8_t* in,

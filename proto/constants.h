@@ -21,7 +21,7 @@
 
 namespace intercore::proto {
 
-inline constexpr int kProtocolVersion = 1;       // bump on ANY wire-format change
+inline constexpr int kProtocolVersion = 2;       // bump on ANY wire-format change
 inline constexpr int kMsdCompanyId = 0xFFFF;     // BLE manufacturer id (landmine #2)
 inline constexpr int kMsdPattern0 = 0x01;        // MSD scan-filter pattern, byte 0
 inline constexpr int kMsdPattern1 = 0x01;        // MSD scan-filter pattern, byte 1
@@ -31,18 +31,20 @@ inline constexpr int kMsdPattern1 = 0x01;        // MSD scan-filter pattern, byt
 inline constexpr char kServiceUuid[] = "b1f0c0de-1a2b-4c3d-8e5f-000000000001";
 inline constexpr char kPsmCharUuid[] = "b1f0c0de-1a2b-4c3d-8e5f-000000000002";
 
-// ---- Voice path (locked 2026-06-14, issue #16; M1_PLAN.md §2) --------------
-// IMA ADPCM over 16 kHz mono PCM16, 20 ms frames. The on-wire frame is
+// ---- Voice path (locked 2026-06-14, issue #16; narrowed 2026-06-16) --------
+// IMA ADPCM over 8 kHz mono PCM16, 20 ms frames. Narrowed from 16 kHz on
+// 2026-06-16 to halve on-wire bitrate (~8.6 -> ~4.6 KB/s) for SCO airtime
+// headroom (Track 0 probe; M1 design was 16 kHz). The on-wire frame is
 // little-endian and SELF-CONTAINED — each header carries the pre-roll IMA
 // predictor snapshot, so a single lost frame costs exactly one 20 ms gap and
 // the next frame self-heals from its own header:
-//   epoch u32 | seq u32 | predSample i16 | stepIndex u8 | reserved u8 | adpcm[160]
-inline constexpr int kVoiceSampleRateHz  = 16000;  // wideband PCM16, mono
+//   epoch u32 | seq u32 | predSample i16 | stepIndex u8 | reserved u8 | adpcm[80]
+inline constexpr int kVoiceSampleRateHz  = 8000;   // narrowband PCM16, mono
 inline constexpr int kVoiceFrameMs       = 20;     // 50 fps
-inline constexpr int kVoiceFrameSamples  = 320;    // 16000 * 20 / 1000
-inline constexpr int kVoiceAdpcmBytes    = 160;    // 320 samples * 4 bit, 2/byte
+inline constexpr int kVoiceFrameSamples  = 160;    // 8000 * 20 / 1000
+inline constexpr int kVoiceAdpcmBytes    = 80;     // 160 samples * 4 bit, 2/byte
 inline constexpr int kVoiceHeaderBytes   = 12;     // epoch+seq+pred+step+reserved
-inline constexpr int kVoiceFrameBytes    = 172;    // header + adpcm payload
+inline constexpr int kVoiceFrameBytes    = 92;     // header + adpcm payload
 inline constexpr int kVoiceStepIndexMax  = 88;     // IMA step-table top index
 
 // Wire field offsets (bytes from frame start). Single-sourced so the Kotlin and

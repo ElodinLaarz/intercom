@@ -16,8 +16,8 @@ namespace proto = intercore::proto;
 
 namespace {
 
-constexpr int kSamples = proto::kVoiceFrameSamples;  // 320
-constexpr int kBytes = proto::kVoiceAdpcmBytes;      // 160
+constexpr int kSamples = proto::kVoiceFrameSamples;  // 160
+constexpr int kBytes = proto::kVoiceAdpcmBytes;      // 80
 constexpr double kPi = 3.14159265358979323846;
 
 // IMA is lossy, but encode and decode share predictor math, so re-encoding the
@@ -91,9 +91,9 @@ void zero_payload_holds_predictor() {
   for (int i = 0; i < kSamples; ++i) CHECK(out[i] == 4321);
 }
 
-// 160 bytes decode to EXACTLY 320 samples and predSample is pre-roll state: the
+// 80 bytes decode to EXACTLY 160 samples and predSample is pre-roll state: the
 // first output is predict(predSample, nibble0), not the raw predSample — which
-// is why it is 320 samples, not 321. nibble 7 at index 0 yields +11.
+// is why it is 160 samples, not 161. nibble 7 at index 0 yields +11.
 void first_sample_is_predicted_not_raw() {
   std::array<std::uint8_t, kBytes> bytes{};
   bytes[0] = 0x07;  // low nibble of byte 0 = sample 0

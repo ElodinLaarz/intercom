@@ -25,7 +25,7 @@ VoiceFrame goldenFrame() {
   f.predSample = static_cast<std::int16_t>(-2);                        // 0xFFFE
   f.stepIndex = static_cast<std::uint8_t>(proto::kVoiceStepIndexMax);  // 88, 0x58
   for (int i = 0; i < proto::kVoiceAdpcmBytes; ++i) {
-    f.adpcm[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(i);  // 0..159
+    f.adpcm[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(i);  // 0..79
   }
   return f;
 }
@@ -39,7 +39,7 @@ void serialize_matches_golden_bytes() {
   CHECK(out[10] == 0x58);                   // stepIndex 88
   CHECK(out[11] == 0x00);                   // reserved
   CHECK(out[12] == 0x00 && out[13] == 0x01);                // adpcm[0..1]
-  CHECK(out[proto::kVoiceFrameBytes - 1] == 0x9F);          // adpcm[159] == 159
+  CHECK(out[proto::kVoiceFrameBytes - 1] == 0x4F);          // adpcm[79] == 79
 }
 
 void round_trips_through_parse() {

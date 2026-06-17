@@ -45,7 +45,7 @@ class VoiceFrameTest {
         assertEquals(0x00, u(out[11])) // reserved
         assertEquals(0x00, u(out[12])) // adpcm[0]
         assertEquals(0x01, u(out[13])) // adpcm[1]
-        assertEquals(0x9F, u(out[Proto.VOICE_FRAME_BYTES - 1])) // adpcm[159] == 159
+        assertEquals(0x4F, u(out[Proto.VOICE_FRAME_BYTES - 1])) // adpcm[79] == 79
     }
 
     @Test

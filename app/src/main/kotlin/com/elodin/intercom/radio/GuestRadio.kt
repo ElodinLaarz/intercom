@@ -23,9 +23,7 @@ import com.elodin.intercom.audio.VoiceAudioRoute
 import com.elodin.intercom.proto.Proto
 import com.elodin.intercom.session.RadioEndpoint
 import com.elodin.intercom.session.RadioEvent
-import java.io.DataInputStream
 import java.io.IOException
-import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -491,54 +489,51 @@ internal class GuestRadio(
 
         Log.i(TAG, "RADIO l2cap duplex audio epoch=$epoch")
         emitStatus("Voice link up — duplex audio")
-        thread(isDaemon = true, name = "l2cap-rx") { readRemoteFrames(generation, socket) }
-        writeCaptureFrames(generation, socket, epoch)
+        val voice = realtimeVoiceSession(generation, socket, epoch)
+        thread(isDaemon = true, name = "voice-rx") {
+            voice.runRx()
+            closeAndDetachSocket(socket)
+            if (!isL2capCurrent(generation)) return@thread
+            Log.w(TAG, "RADIO l2cap host closed — link lost")
+            emitLinkLost("Host disconnected")
+        }
+        voice.runTx("Host disconnected")
     }
 
-    private fun writeCaptureFrames(
+    private fun realtimeVoiceSession(
         generation: Int,
         socket: BluetoothSocket,
         epoch: Long,
-    ) {
-        val output = socket.outputStream
-        val txMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
-        var lastFrameAtMs = SystemClock.elapsedRealtime()
-        try {
-            while (isL2capCurrent(generation)) {
-                val bundleFrames = bundleFramesForRoute()
-                val bundle = NativeCore.takeGuestBundle(bundleFrames, TX_FRAME_TIMEOUT_MS)
-                if (bundle == null) {
-                    lastFrameAtMs = recoverCaptureIfStalled(epoch, lastFrameAtMs) ?: return
-                    continue
-                }
-                lastFrameAtMs = SystemClock.elapsedRealtime()
-                val writeMs = writeBundle(output, bundle)
-                txMeter.onSample(bundleFrames, bundle.size, writeMs)?.let { Log.i(TAG, "TXNET epoch=$epoch $it") }
-            }
-        } catch (e: IOException) {
-            if (isL2capCurrent(generation)) {
-                Log.w(TAG, "RADIO l2cap tx ended: ${e.message}")
-                emitLinkLost("Host disconnected")
-            }
-        } finally {
-            stopCapture()
-            closeAndDetachSocket(socket)
-        }
-    }
-
-    private fun recoverCaptureIfStalled(
-        epoch: Long,
-        lastFrameAtMs: Long,
-    ): Long? {
-        val nowMs = SystemClock.elapsedRealtime()
-        if (nowMs - lastFrameAtMs <= CAPTURE_STALL_RESTART_MS) return lastFrameAtMs
-
-        Log.w(TAG, "AUDIO capture starved — restarting epoch=$epoch")
-        if (restartCapture(epoch)) return SystemClock.elapsedRealtime()
-
-        emitLinkLost("Audio capture stalled")
-        return null
-    }
+    ): RealtimeVoiceSession =
+        RealtimeVoiceSession(
+            epoch = epoch,
+            io =
+                RealtimeVoiceIo(
+                    transport =
+                        L2capVoiceTransport(
+                            socket = socket,
+                            frameBytes = Proto.VOICE_FRAME_BYTES,
+                            nowMs = { SystemClock.elapsedRealtime() },
+                        ),
+                    source = NativeVoiceFrameSource,
+                    sink = NativeVoiceFrameSink,
+                ),
+            callbacks =
+                RealtimeVoiceCallbacks(
+                    isCurrent = { isL2capCurrent(generation) },
+                    bundleFrames = { bundleFramesForRoute() },
+                    restartCapture = { restartCapture(epoch) },
+                    onLinkLost = { reason -> if (isL2capCurrent(generation)) emitLinkLost(reason) },
+                    onTxEnded = {
+                        stopCapture()
+                        closeAndDetachSocket(socket)
+                    },
+                    onRxFrameAccepted = { accepted -> reportAcceptedFrame(accepted) },
+                    logInfo = { message -> Log.i(TAG, message) },
+                    logWarn = { message -> Log.w(TAG, message) },
+                ),
+            nowMs = { SystemClock.elapsedRealtime() },
+        )
 
     // Smaller packet rate on a radio-sharing BT route (landmine #1): bundle
     // consecutive frames into one write rather than dropping them — dropping
@@ -547,55 +542,6 @@ internal class GuestRadio(
     private fun bundleFramesForRoute(): Int {
         if (VoiceAudioRoute.isCommunicationRouteDegraded()) return DEGRADED_BUNDLE_FRAMES
         return 1
-    }
-
-    // One socket write carries a whole bundle of consecutive frames; returns how
-    // long write()+flush() blocked so the meter can spot send backpressure.
-    // IOException propagates to the writer loop and ends the link.
-    private fun writeBundle(
-        output: OutputStream,
-        bundle: ByteArray,
-    ): Long {
-        val startMs = SystemClock.elapsedRealtime()
-        output.write(bundle)
-        output.flush()
-        return SystemClock.elapsedRealtime() - startMs
-    }
-
-    // Drain frames until the host drops or we tear down. Native owns decode,
-    // epoch/SeqFilter gating, jitter buffering, and Oboe output (#23).
-    private fun readRemoteFrames(
-        generation: Int,
-        socket: BluetoothSocket,
-    ) {
-        val input = DataInputStream(socket.inputStream)
-        val buf = ByteArray(Proto.VOICE_FRAME_BYTES)
-        val rxMeter = ThroughputMeter(TX_NET_WINDOW_MS) { SystemClock.elapsedRealtime() }
-        var received = 0L
-        var accepted = 0L
-        try {
-            while (isL2capCurrent(generation)) {
-                val readStartMs = SystemClock.elapsedRealtime()
-                input.readFully(buf)
-                val readMs = SystemClock.elapsedRealtime() - readStartMs
-                if (!isL2capCurrent(generation)) return
-                received += 1
-                rxMeter.onSample(1, buf.size, readMs)?.let { Log.i(TAG, "RXNET $it") }
-                if (NativeCore.pushHostFrame(buf)) {
-                    accepted += 1
-                    reportAcceptedFrame(accepted)
-                    continue
-                }
-                Log.w(TAG, "RADIO l2cap rx dropped frame #$received")
-            }
-        } catch (e: IOException) {
-            if (isL2capCurrent(generation)) Log.w(TAG, "RADIO l2cap rx ended: ${e.message}")
-        } finally {
-            closeAndDetachSocket(socket)
-        }
-        if (!isL2capCurrent(generation)) return
-        Log.w(TAG, "RADIO l2cap host closed — link lost")
-        emitLinkLost("Host disconnected")
     }
 
     private fun reportAcceptedFrame(accepted: Long) {
@@ -848,10 +794,7 @@ internal class GuestRadio(
         private const val MAX_WIRE_EPOCH = 4_294_967_295L // 2^32 - 1: max u32 wire epoch
         private const val HOST_LINK_PARAMS_BYTES = 2 * Integer.BYTES
         private const val EPOCH_WAIT_MS = 100L
-        private const val TX_FRAME_TIMEOUT_MS = 100
         private const val DEGRADED_BUNDLE_FRAMES = 2
-        private const val TX_NET_WINDOW_MS = 2_000L
-        private const val CAPTURE_STALL_RESTART_MS = 2_000L
         private const val SCAN_STATUS = "Scanning for host…"
         private const val SCAN_RETRY_MS = 750L
         private const val SCAN_REFRESH_MS = 10_000L

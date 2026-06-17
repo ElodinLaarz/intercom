@@ -6,7 +6,7 @@ import java.nio.ByteOrder
 /**
  * One on-wire voice frame (M1_PLAN.md §2). Little-endian, [Proto.VOICE_FRAME_BYTES]:
  *
- *   `epoch u32 | seq u32 | predSample i16 | stepIndex u8 | reserved u8 | adpcm[160]`
+ *   `epoch u32 | seq u32 | predSample i16 | stepIndex u8 | reserved u8 | adpcm[80]`
  *
  * [predSample]/[stepIndex] are the pre-roll IMA predictor snapshot the decoder
  * seeds from — frames are self-contained, so a single lost frame costs exactly
