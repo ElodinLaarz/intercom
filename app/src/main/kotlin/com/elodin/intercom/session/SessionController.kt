@@ -127,6 +127,7 @@ internal class SessionController(
                 role = endpoint.role,
                 peer = event.peer,
                 psm = event.psm,
+                wireEpoch = wireEpoch,
                 detail = detail,
             ),
         )

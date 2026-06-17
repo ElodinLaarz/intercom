@@ -46,6 +46,7 @@ internal sealed interface LinkState {
         override val role: LinkRole,
         val peer: String,
         val psm: Int,
+        val wireEpoch: Long,
         override val detail: String,
     ) : LinkState
 

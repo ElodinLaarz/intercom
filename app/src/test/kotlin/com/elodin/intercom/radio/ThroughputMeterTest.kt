@@ -1,8 +1,8 @@
 package com.elodin.intercom.radio
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ThroughputMeterTest {
@@ -20,14 +20,14 @@ class ThroughputMeterTest {
     @Test
     fun computesRatesOverTheWindow() {
         val meter = meter(100L)
-        assertNull(meter.onSample(1, 100, 10L)) // t=0, window opens
+        assertNull(meter.onSample(1, 100, 10L))
         clock = 100L
-        val line = meter.onSample(1, 100, 10L)!! // t=100, window closes
-        assertTrue(line, line.contains("ops=2"))
-        assertTrue(line, line.contains("frames=2"))
-        assertTrue(line, line.contains("bytes=200"))
-        assertTrue(line, line.contains("Bps=2000")) // 200 bytes / 0.1 s
-        assertTrue(line, line.contains("busyPct=20")) // 20 ms busy / 100 ms
+        val snap = meter.onSample(1, 100, 10L)!!
+        assertEquals(2L, snap.ops)
+        assertEquals(2L, snap.frames)
+        assertEquals(200L, snap.bytes)
+        assertEquals(2000L, snap.bps)
+        assertEquals(20L, snap.busyPct)
     }
 
     @Test
@@ -35,10 +35,10 @@ class ThroughputMeterTest {
         val meter = meter(100L)
         assertNull(meter.onSample(1, 100, 0L))
         clock = 100L
-        assertNotNull(meter.onSample(1, 100, 0L)) // first window emits
+        assertNotNull(meter.onSample(1, 100, 0L))
         clock = 250L
-        val line = meter.onSample(5, 500, 0L)!! // second window starts fresh
-        assertTrue(line, line.contains("ops=1"))
-        assertTrue(line, line.contains("frames=5"))
+        val snap = meter.onSample(5, 500, 0L)!!
+        assertEquals(1L, snap.ops)
+        assertEquals(5L, snap.frames)
     }
 }

@@ -7,23 +7,19 @@ import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.elodin.intercom.diag.DiagSnapshot
 import com.elodin.intercom.session.LinkState
 import com.elodin.intercom.session.RadioEndpoint
 import com.elodin.intercom.session.RadioEndpointFactory
 import com.elodin.intercom.session.RadioEvent
 import com.elodin.intercom.session.SessionController
 
-/**
- * Android/Compose adapter for the M1 radio debug screen. The link state lives in
- * [SessionController]; this class only builds Android radio endpoints and
- * marshals rendered state updates onto the main looper.
- */
 class RadioController(
     context: Context,
 ) {
     private val session =
         SessionController(
-            factory = AndroidRadioEndpointFactory(context),
+            factory = AndroidRadioEndpointFactory(context, ::onStats),
             onState = ::render,
             logger = { line -> Log.i(TAG, line) },
         )
@@ -33,6 +29,8 @@ class RadioController(
     var hosting by mutableStateOf(session.state.hosting)
         private set
     var guesting by mutableStateOf(session.state.guesting)
+        private set
+    var stats by mutableStateOf<ConnectionStats?>(null)
         private set
 
     fun startHost() {
@@ -59,12 +57,19 @@ class RadioController(
         session.close()
     }
 
+    fun snapshotText(context: Context): String = DiagSnapshot.capture(context, session.state, stats).format()
+
     private fun render(state: LinkState) {
         dispatch {
             status = state.detail
             hosting = state.hosting
             guesting = state.guesting
+            if (state !is LinkState.Linked) stats = null
         }
+    }
+
+    private fun onStats(newStats: ConnectionStats) {
+        dispatch { stats = newStats }
     }
 
     private fun dispatch(block: () -> Unit) {
@@ -77,17 +82,20 @@ class RadioController(
 
     private class AndroidRadioEndpointFactory(
         private val context: Context,
+        private val onStats: (ConnectionStats) -> Unit,
     ) : RadioEndpointFactory {
         override fun host(onEvent: (RadioEvent) -> Unit): RadioEndpoint =
             HostRadio(
                 context = context,
                 onEvent = onEvent,
+                onStats = onStats,
             )
 
         override fun guest(onEvent: (RadioEvent) -> Unit): RadioEndpoint =
             GuestRadio(
                 context = context,
                 onEvent = onEvent,
+                onStats = onStats,
             )
     }
 

@@ -1,9 +1,25 @@
 package com.elodin.intercom.radio
 
+internal data class MeterSnapshot(
+    val windowMs: Long,
+    val ops: Long,
+    val frames: Long,
+    val bytes: Long,
+    val bps: Long,
+    val fps: Long,
+    val busyMs: Long,
+    val busyPct: Long,
+    val maxBusyMs: Long,
+) {
+    override fun toString(): String =
+        "windowMs=$windowMs ops=$ops frames=$frames bytes=$bytes " +
+            "Bps=$bps fps=$fps busyMs=$busyMs busyPct=$busyPct maxBusyMs=$maxBusyMs"
+}
+
 /**
  * Windowed socket-throughput meter for locating the voice-path bottleneck. It
  * accumulates frames / bytes / time-blocked-in-syscall per sample and emits one
- * summary line per [windowMs].
+ * summary per [windowMs].
  *
  * On the TX side the blocked time is `write()`+`flush()` — a high `busyPct`
  * means the BT stack/link can't absorb the send (local backpressure), and once
@@ -27,12 +43,12 @@ internal class ThroughputMeter(
     private var busyMs = 0L
     private var maxBusyMs = 0L
 
-    /** Record one socket op; returns a summary once per window, else null. */
+    /** Record one socket op; returns a snapshot once per window, else null. */
     fun onSample(
         frameCount: Int,
         byteCount: Int,
         opMs: Long,
-    ): String? {
+    ): MeterSnapshot? {
         val now = nowMs()
         if (windowStartMs == Long.MIN_VALUE) windowStartMs = now
         ops += 1
@@ -44,18 +60,24 @@ internal class ThroughputMeter(
         val elapsed = now - windowStartMs
         if (elapsed < windowMs) return null
 
-        val summary = summarize(elapsed)
+        val snapshot = summarize(elapsed)
         resetWindow(now)
-        return summary
+        return snapshot
     }
 
-    private fun summarize(elapsedMs: Long): String {
+    private fun summarize(elapsedMs: Long): MeterSnapshot {
         val seconds = elapsedMs / MILLIS_PER_SECOND.toDouble()
-        val bps = if (seconds > 0.0) (bytes / seconds).toLong() else 0L
-        val fps = if (seconds > 0.0) (frames / seconds).toLong() else 0L
-        val busyPct = if (elapsedMs > 0L) busyMs * PERCENT / elapsedMs else 0L
-        return "windowMs=$elapsedMs ops=$ops frames=$frames bytes=$bytes " +
-            "Bps=$bps fps=$fps busyMs=$busyMs busyPct=$busyPct maxBusyMs=$maxBusyMs"
+        return MeterSnapshot(
+            windowMs = elapsedMs,
+            ops = ops,
+            frames = frames,
+            bytes = bytes,
+            bps = if (seconds > 0.0) (bytes / seconds).toLong() else 0L,
+            fps = if (seconds > 0.0) (frames / seconds).toLong() else 0L,
+            busyMs = busyMs,
+            busyPct = if (elapsedMs > 0L) busyMs * PERCENT / elapsedMs else 0L,
+            maxBusyMs = maxBusyMs,
+        )
     }
 
     private fun resetWindow(now: Long) {
