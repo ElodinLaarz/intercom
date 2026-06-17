@@ -29,6 +29,7 @@ internal data class RealtimeVoiceCallbacks(
     val onLinkLost: (String) -> Unit,
     val onTxEnded: () -> Unit,
     val onRxFrameAccepted: (Long) -> Unit,
+    val onStats: (ConnectionStats) -> Unit = {},
     val logInfo: (String) -> Unit,
     val logWarn: (String) -> Unit,
 )
@@ -57,6 +58,12 @@ internal class RealtimeVoiceSession(
 ) {
     private val txMeter = ThroughputMeter(config.throughputWindowMs, nowMs)
     private val rxMeter = ThroughputMeter(config.throughputWindowMs, nowMs)
+
+    @Volatile
+    private var lastTxSnapshot: MeterSnapshot? = null
+
+    @Volatile
+    private var lastRxSnapshot: MeterSnapshot? = null
 
     fun runTx(peerDisconnectedReason: String) {
         var lastFrameAtMs = nowMs()
@@ -96,8 +103,10 @@ internal class RealtimeVoiceSession(
                     callbacks.logWarn("RADIO voice rx dropped malformed packet bytes=${packet.size}")
                     continue
                 }
-                rxMeter.onSample(frameCount, packet.size, readMs)?.let {
-                    callbacks.logInfo("RXNET $it")
+                rxMeter.onSample(frameCount, packet.size, readMs)?.let { snap ->
+                    callbacks.logInfo("RXNET $snap")
+                    lastRxSnapshot = snap
+                    pushStats()
                 }
 
                 var offset = 0
@@ -131,8 +140,10 @@ internal class RealtimeVoiceSession(
             return
         }
 
-        txMeter.onSample(frameCount, packet.size, result.busyMs)?.let {
-            callbacks.logInfo("TXNET epoch=$epoch $it")
+        txMeter.onSample(frameCount, packet.size, result.busyMs)?.let { snap ->
+            callbacks.logInfo("TXNET epoch=$epoch $snap")
+            lastTxSnapshot = snap
+            pushStats()
         }
     }
 
@@ -140,6 +151,22 @@ internal class RealtimeVoiceSession(
         if (packet.isEmpty()) return null
         if (packet.size % config.frameBytes != 0) return null
         return packet.size / config.frameBytes
+    }
+
+    private fun pushStats() {
+        val tx = lastTxSnapshot
+        val rx = lastRxSnapshot
+        callbacks.onStats(
+            ConnectionStats(
+                txBps = tx?.bps ?: 0,
+                txFps = tx?.fps ?: 0,
+                txBusyPct = tx?.busyPct ?: 0,
+                rxBps = rx?.bps ?: 0,
+                rxFps = rx?.fps ?: 0,
+                rxBusyPct = rx?.busyPct ?: 0,
+                rxMaxBusyMs = rx?.maxBusyMs ?: 0,
+            ),
+        )
     }
 
     private fun recoverCaptureIfStalled(lastFrameAtMs: Long): Long? {

@@ -47,6 +47,7 @@ import kotlin.concurrent.thread
 internal class GuestRadio(
     private val context: Context,
     private val onEvent: (RadioEvent) -> Unit,
+    private val onStats: (ConnectionStats) -> Unit = {},
 ) : RadioEndpoint {
     private val serviceUuid: UUID = UUID.fromString(Proto.SERVICE_UUID)
     private val psmCharUuid: UUID = UUID.fromString(Proto.PSM_CHAR_UUID)
@@ -529,6 +530,7 @@ internal class GuestRadio(
                         closeAndDetachSocket(socket)
                     },
                     onRxFrameAccepted = { accepted -> reportAcceptedFrame(accepted) },
+                    onStats = onStats,
                     logInfo = { message -> Log.i(TAG, message) },
                     logWarn = { message -> Log.w(TAG, message) },
                 ),
