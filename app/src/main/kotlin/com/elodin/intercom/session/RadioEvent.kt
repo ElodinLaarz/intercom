@@ -21,6 +21,13 @@ internal sealed interface RadioEvent {
         val reason: String,
     ) : RadioEvent
 
+    // A recoverable drop: the radio endpoint is self-healing and stays alive,
+    // so the session must NOT tear it down (unlike LinkLost/Failed). Emitted by
+    // the Wi-Fi Direct radios while they re-discover/re-accept the peer.
+    data class Reconnecting(
+        val reason: String,
+    ) : RadioEvent
+
     data class Failed(
         val reason: String,
     ) : RadioEvent

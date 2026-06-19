@@ -13,16 +13,20 @@ import com.elodin.intercom.session.RadioEndpoint
 import com.elodin.intercom.session.RadioEndpointFactory
 import com.elodin.intercom.session.RadioEvent
 import com.elodin.intercom.session.SessionController
+import com.elodin.intercom.session.TransportMode
+import com.elodin.intercom.wifidirect.WifiDirectGuestRadio
+import com.elodin.intercom.wifidirect.WifiDirectHostRadio
 
+@Suppress("TooManyFunctions")
 class RadioController(
     context: Context,
 ) {
-    private val session =
-        SessionController(
-            factory = AndroidRadioEndpointFactory(context, ::onStats),
-            onState = ::render,
-            logger = { line -> Log.i(TAG, line) },
-        )
+    private val appContext: Context = context.applicationContext
+
+    var transportMode by mutableStateOf(TransportMode.Bluetooth)
+        private set
+
+    private var session = createSession(TransportMode.Bluetooth)
 
     var status by mutableStateOf(session.state.detail)
         private set
@@ -53,11 +57,34 @@ class RadioController(
         session.stopAll()
     }
 
+    fun switchTransport(mode: TransportMode) {
+        if (mode == transportMode) return
+        session.close()
+        transportMode = mode
+        session = createSession(mode)
+        render(session.state)
+    }
+
     fun close() {
         session.close()
     }
 
     fun snapshotText(context: Context): String = DiagSnapshot.capture(context, session.state, stats).format()
+
+    private fun createSession(mode: TransportMode): SessionController =
+        SessionController(
+            factory = factoryFor(mode),
+            onState = ::render,
+            logger = { line -> Log.i(TAG, line) },
+        )
+
+    private fun factoryFor(mode: TransportMode): RadioEndpointFactory =
+        when (mode) {
+            TransportMode.Bluetooth ->
+                AndroidRadioEndpointFactory(appContext, ::onStats)
+            TransportMode.WifiDirect ->
+                WifiDirectEndpointFactory(appContext, ::onStats)
+        }
 
     private fun render(state: LinkState) {
         dispatch {
@@ -93,6 +120,25 @@ class RadioController(
 
         override fun guest(onEvent: (RadioEvent) -> Unit): RadioEndpoint =
             GuestRadio(
+                context = context,
+                onEvent = onEvent,
+                onStats = onStats,
+            )
+    }
+
+    private class WifiDirectEndpointFactory(
+        private val context: Context,
+        private val onStats: (ConnectionStats) -> Unit,
+    ) : RadioEndpointFactory {
+        override fun host(onEvent: (RadioEvent) -> Unit): RadioEndpoint =
+            WifiDirectHostRadio(
+                context = context,
+                onEvent = onEvent,
+                onStats = onStats,
+            )
+
+        override fun guest(onEvent: (RadioEvent) -> Unit): RadioEndpoint =
+            WifiDirectGuestRadio(
                 context = context,
                 onEvent = onEvent,
                 onStats = onStats,

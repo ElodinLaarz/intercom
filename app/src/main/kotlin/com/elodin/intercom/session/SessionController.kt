@@ -91,6 +91,7 @@ internal class SessionController(
             is RadioEvent.Linked -> onLinked(event)
             is RadioEvent.LinkLost -> tearDownToIdle("Link lost - ${event.reason}")
             is RadioEvent.Failed -> tearDownToIdle(event.reason)
+            is RadioEvent.Reconnecting -> onReconnecting(event)
             is RadioEvent.Status -> onStatus(event.text)
         }
     }
@@ -143,8 +144,21 @@ internal class SessionController(
                 is LinkState.Scanning -> current.copy(detail = text)
                 is LinkState.Connecting -> current.copy(detail = text)
                 is LinkState.Linked -> current.copy(detail = text)
+                is LinkState.Reconnecting -> current.copy(detail = text)
             }
         if (next.role == endpoint.role || next is LinkState.Idle) setState(next)
+    }
+
+    // A recoverable drop. The radio endpoint stays alive and is re-establishing
+    // the peer, so we must NOT call epoch.close() (that stops the endpoint) and
+    // must NOT drop activeEndpoint/invalidate events — the endpoint keeps its
+    // token so its rejoin Linked event is still accepted. The radio already
+    // stopped the dead epoch's audio, so just release the epoch id here; the
+    // rejoin's Linked event re-enters onLinked and mints a fresh epoch.
+    private fun onReconnecting(event: RadioEvent.Reconnecting) {
+        val endpoint = activeEndpoint ?: return
+        activeEpoch = null
+        setState(LinkState.Reconnecting(role = endpoint.role, detail = event.reason))
     }
 
     private fun stopActive(reportStopped: Boolean) {

@@ -1,6 +1,6 @@
 package com.elodin.intercom.radio
 
-internal data class MeterSnapshot(
+data class MeterSnapshot(
     val windowMs: Long,
     val ops: Long,
     val frames: Long,

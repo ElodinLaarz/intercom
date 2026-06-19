@@ -50,6 +50,14 @@ internal sealed interface LinkState {
         override val detail: String,
     ) : LinkState
 
+    // The link dropped but the active endpoint is self-healing (Wi-Fi Direct
+    // auto-rejoin). Role is retained so the UI stays in Host/Guest mode rather
+    // than falling back to Idle while the radio re-establishes the peer.
+    data class Reconnecting(
+        override val role: LinkRole,
+        override val detail: String = "Reconnecting…",
+    ) : LinkState
+
     companion object {
         const val IDLE_DETAIL = "Idle - Host to advertise, Guest to scan"
     }

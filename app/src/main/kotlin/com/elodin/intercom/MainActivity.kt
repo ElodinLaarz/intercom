@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -40,14 +41,8 @@ import androidx.lifecycle.ViewModelProvider
 import com.elodin.intercom.proto.Proto
 import com.elodin.intercom.radio.ConnectionStats
 import com.elodin.intercom.radio.RadioController
+import com.elodin.intercom.session.TransportMode
 
-/**
- * M1 tracer-bullet debug screen: two buttons start each role (one role per
- * phone). Host (#18) advertises + GATT + L2CAP; Guest (#19) scans, connects, and
- * reads the host's L2CAP PSM. Each is a start/stop toggle and they're mutually
- * exclusive; [RadioController] holds the live state the status line renders. See
- * M1_PLAN.md §3.
- */
 class MainActivity : ComponentActivity() {
     private val model by viewModels<IntercomViewModel> {
         IntercomViewModel.Factory(applicationContext)
@@ -85,27 +80,29 @@ class MainActivity : ComponentActivity() {
                         hosting = radio.hosting,
                         guesting = radio.guesting,
                         stats = radio.stats,
+                        transportMode = radio.transportMode,
                         onHost = { onHostButton() },
                         onGuest = { onGuestButton() },
                         onDiag = { shareDiagSnapshot() },
+                        onTransportChange = { onTransportChange(it) },
                     )
                 }
             }
         }
     }
 
-    // Host and Guest toggle and are mutually exclusive (one role per phone).
+    private fun onTransportChange(mode: TransportMode) {
+        if (radio.hosting || radio.guesting) return
+        radio.switchTransport(mode)
+    }
+
     private fun onHostButton() {
         if (radio.hosting) {
             radio.stopHost()
             return
         }
         ensurePermissions(
-            arrayOf(
-                Manifest.permission.BLUETOOTH_ADVERTISE,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.RECORD_AUDIO,
-            ),
+            hostPermissions(),
             requestHostPermissions,
         ) { radio.startHost() }
     }
@@ -116,14 +113,41 @@ class MainActivity : ComponentActivity() {
             return
         }
         ensurePermissions(
-            arrayOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.RECORD_AUDIO,
-            ),
+            guestPermissions(),
             requestGuestPermissions,
         ) { radio.startGuest() }
     }
+
+    private fun hostPermissions(): Array<String> =
+        when (radio.transportMode) {
+            TransportMode.Bluetooth ->
+                arrayOf(
+                    Manifest.permission.BLUETOOTH_ADVERTISE,
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.RECORD_AUDIO,
+                )
+            TransportMode.WifiDirect ->
+                wifiDirectPermissions() + Manifest.permission.RECORD_AUDIO
+        }
+
+    private fun guestPermissions(): Array<String> =
+        when (radio.transportMode) {
+            TransportMode.Bluetooth ->
+                arrayOf(
+                    Manifest.permission.BLUETOOTH_SCAN,
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.RECORD_AUDIO,
+                )
+            TransportMode.WifiDirect ->
+                wifiDirectPermissions() + Manifest.permission.RECORD_AUDIO
+        }
+
+    private fun wifiDirectPermissions(): Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
 
     private fun ensurePermissions(
         perms: Array<String>,
@@ -141,8 +165,6 @@ class MainActivity : ComponentActivity() {
         launcher.launch(perms)
     }
 
-    // selfTest can throw UnsatisfiedLinkError if the .so failed to load — log it
-    // rather than crash, so the smoke harness still sees the NATIVE line.
     @Suppress("TooGenericExceptionCaught")
     private fun nativeSelfTest(): String =
         try {
@@ -197,10 +219,13 @@ private fun HomeScreen(
     hosting: Boolean,
     guesting: Boolean,
     stats: ConnectionStats?,
+    transportMode: TransportMode,
     onHost: () -> Unit,
     onGuest: () -> Unit,
     onDiag: () -> Unit,
+    onTransportChange: (TransportMode) -> Unit,
 ) {
+    val sessionActive = hosting || guesting
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier.fillMaxSize().padding(32.dp),
@@ -213,7 +238,13 @@ private fun HomeScreen(
                 text = "M1 tracer — one role per phone",
                 style = MaterialTheme.typography.bodyMedium,
             )
-            Spacer(Modifier.height(48.dp))
+            Spacer(Modifier.height(32.dp))
+            TransportToggle(
+                current = transportMode,
+                enabled = !sessionActive,
+                onChange = onTransportChange,
+            )
+            Spacer(Modifier.height(32.dp))
             Row {
                 Button(onClick = onHost) { Text(if (hosting) "Stop" else "Host") }
                 Spacer(Modifier.width(24.dp))
@@ -226,7 +257,7 @@ private fun HomeScreen(
                 StatsPanel(stats)
             }
         }
-        if (hosting || guesting) {
+        if (sessionActive) {
             TextButton(
                 onClick = onDiag,
                 modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(8.dp),
@@ -256,5 +287,32 @@ private fun StatsPanel(stats: ConnectionStats) {
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
         )
+    }
+}
+
+@Composable
+private fun TransportToggle(
+    current: TransportMode,
+    enabled: Boolean,
+    onChange: (TransportMode) -> Unit,
+) {
+    Row {
+        if (current == TransportMode.Bluetooth) {
+            Button(onClick = {}, enabled = enabled) { Text("Bluetooth") }
+        } else {
+            OutlinedButton(
+                onClick = { onChange(TransportMode.Bluetooth) },
+                enabled = enabled,
+            ) { Text("Bluetooth") }
+        }
+        Spacer(Modifier.width(12.dp))
+        if (current == TransportMode.WifiDirect) {
+            Button(onClick = {}, enabled = enabled) { Text("Wi-Fi Direct") }
+        } else {
+            OutlinedButton(
+                onClick = { onChange(TransportMode.WifiDirect) },
+                enabled = enabled,
+            ) { Text("Wi-Fi Direct") }
+        }
     }
 }

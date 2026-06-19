@@ -39,6 +39,39 @@ class SessionControllerTest {
     }
 
     @Test
+    fun reconnectingDoesNotStopEndpoint() {
+        val fixture = Fixture()
+        fixture.controller.startHost()
+        val host = fixture.host
+
+        host.event(RadioEvent.Linked(peer = "AA:BB:CC:DD:EE:FF", psm = 177))
+        host.event(RadioEvent.Reconnecting("Guest disconnected"))
+
+        assertEquals(0, host.stopCount)
+        assertTrue(fixture.controller.state is LinkState.Reconnecting)
+        assertTrue(fixture.controller.state.hosting)
+        assertEquals("Guest disconnected", fixture.controller.state.detail)
+    }
+
+    @Test
+    fun relinkAfterReconnectMintsNewEpochWithoutStopping() {
+        val fixture = Fixture()
+        fixture.controller.startGuest()
+        val guest = fixture.guest
+
+        guest.event(RadioEvent.Linked(peer = "AA:BB:CC:DD:EE:FF", psm = 177, wireEpoch = 0x11L))
+        val first = fixture.controller.state as LinkState.Linked
+        guest.event(RadioEvent.Reconnecting("Host disconnected"))
+        guest.event(RadioEvent.Linked(peer = "AA:BB:CC:DD:EE:FF", psm = 177, wireEpoch = 0x22L))
+        val second = fixture.controller.state as LinkState.Linked
+
+        assertEquals(1L, first.epoch.id)
+        assertEquals(2L, second.epoch.id)
+        assertEquals(0, guest.stopCount)
+        assertEquals(listOf(0x11L, 0x22L), guest.begunEpochs)
+    }
+
+    @Test
     fun linkedEventWireEpochDrivesEndpointAudioEpoch() {
         val fixture = Fixture()
 
