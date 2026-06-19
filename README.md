@@ -1,8 +1,21 @@
 # Intercom
 
-A private 1:1 push-to-talk intercom between two Android phones over Bluetooth LE.
-Pure native: Kotlin + Jetpack Compose + C++ (Oboe + ADPCM). Distributed by sideload
-(Obtainium) from Forgejo releases. Android 12+ (minSdk 31).
+A private 1:1 push-to-talk intercom between two Android phones over Bluetooth LE
+or Wi-Fi Direct. Pure native: Kotlin + Jetpack Compose + C++ (Oboe + ADPCM).
+Distributed by sideload (Obtainium) from Forgejo releases. Android 12+ (minSdk 31).
+
+## Install (Obtainium)
+
+[![Add to Obtainium](https://img.shields.io/badge/Obtainium-Add%20Intercom-1e88e5?style=for-the-badge&logo=android&logoColor=white)](https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fadd%2Fhttp%3A%2F%2F100.95.212.39%3A3000%2Flaarz%2Fintercom)
+
+Reachable over Tailscale only (tailnet-private, no token for read). Tap the badge
+on the phone to add this repo as an Obtainium source, or add it manually:
+
+1. Obtainium → **Add App** → URL `http://100.95.212.39:3000/laarz/intercom`
+   (MagicDNS alt: `http://laarz-desk-1:3000/laarz/intercom`) → source **Forgejo**.
+2. Obtainium tracks the latest release; new versions appear on refresh.
+
+Manual sideload fallback: [Releases](http://100.95.212.39:3000/laarz/intercom/releases).
 
 This is the greenfield v2 restart of `walkie-talkie`. No v1 code was carried over —
 only lessons.
