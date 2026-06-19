@@ -3,7 +3,7 @@
 package com.elodin.intercom.proto
 
 object Proto {
-    const val PROTOCOL_VERSION: Int = 2
+    const val PROTOCOL_VERSION: Int = 3
     const val MSD_COMPANY_ID: Int = 0xFFFF
     const val MSD_PATTERN0: Int = 0x01
     const val MSD_PATTERN1: Int = 0x01
@@ -22,4 +22,16 @@ object Proto {
     const val VOICE_OFF_STEP_INDEX: Int = 10
     const val VOICE_OFF_RESERVED: Int = 11
     const val VOICE_OFF_ADPCM: Int = 12
+    const val MEDIA_SAMPLE_RATE_HZ: Int = 48000
+    const val MEDIA_CHANNELS_MAX: Int = 2
+    const val MEDIA_FRAME_MS: Int = 20
+    const val MEDIA_PAYLOAD_MAX_BYTES: Int = 1536
+    const val MEDIA_STREAM_PORT: Int = 9754
+    const val MEDIA_OFF_EPOCH: Int = 0
+    const val MEDIA_OFF_SEQ: Int = 4
+    const val MEDIA_OFF_FLAGS: Int = 8
+    const val MEDIA_OFF_RESERVED: Int = 9
+    const val MEDIA_OFF_LEN: Int = 10
+    const val MEDIA_OFF_PAYLOAD: Int = 12
+    const val MEDIA_HEADER_BYTES: Int = 12
 }

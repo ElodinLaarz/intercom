@@ -409,6 +409,10 @@ bool RxEngine::pushFrame(const std::uint8_t* data, std::size_t len) {
   return impl_->pushFrame(data, len);
 }
 
+int RxEngine::rxPeak() const {
+  return impl_->decodedPeak.load(std::memory_order_relaxed);
+}
+
 bool RxEngine::Impl::openOutputStreamLocked() {
   oboe::AudioStreamBuilder builder;
   builder.setDirection(oboe::Direction::Output);

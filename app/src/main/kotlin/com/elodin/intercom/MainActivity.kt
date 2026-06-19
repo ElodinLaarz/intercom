@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -38,11 +39,13 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import com.elodin.intercom.media.MediaShareService
 import com.elodin.intercom.proto.Proto
 import com.elodin.intercom.radio.ConnectionStats
 import com.elodin.intercom.radio.RadioController
 import com.elodin.intercom.session.TransportMode
 
+@Suppress("TooManyFunctions")
 class MainActivity : ComponentActivity() {
     private val model by viewModels<IntercomViewModel> {
         IntercomViewModel.Factory(applicationContext)
@@ -67,6 +70,20 @@ class MainActivity : ComponentActivity() {
             radio.startGuest()
         }
 
+    private val requestMediaProjection =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode != RESULT_OK || result.data == null) {
+                Log.w(TAG, "MEDIA projection consent denied")
+                return@registerForActivityResult
+            }
+            MediaShareService.start(
+                this,
+                result.resultCode,
+                result.data!!,
+            )
+            radio.startShareAudio()
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.i(TAG, "STARTED version=${BuildConfig.VERSION_NAME}")
@@ -79,12 +96,19 @@ class MainActivity : ComponentActivity() {
                         status = radio.status,
                         hosting = radio.hosting,
                         guesting = radio.guesting,
+                        linked = radio.linked,
                         stats = radio.stats,
                         transportMode = radio.transportMode,
+                        mediaSharing = radio.mediaSharing,
+                        mediaPartnerSharing = radio.mediaPartnerSharing,
+                        mediaCaptureSupported = radio.mediaCaptureSupported,
+                        mediaCaptureSilent = radio.mediaCaptureSilent,
                         onHost = { onHostButton() },
                         onGuest = { onGuestButton() },
                         onDiag = { shareDiagSnapshot() },
                         onTransportChange = { onTransportChange(it) },
+                        onShareAudio = { launchShareAudio() },
+                        onStopShareAudio = { onStopShareAudio() },
                     )
                 }
             }
@@ -117,6 +141,37 @@ class MainActivity : ComponentActivity() {
             requestGuestPermissions,
         ) { radio.startGuest() }
     }
+
+    private fun launchShareAudio() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted =
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                requestPostNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                return
+            }
+        }
+        val mpManager =
+            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        requestMediaProjection.launch(mpManager.createScreenCaptureIntent())
+    }
+
+    private fun onStopShareAudio() {
+        // RadioController/MediaShareController stops the foreground service.
+        radio.stopShareAudio()
+    }
+
+    private val requestPostNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted) {
+                Log.w(TAG, "MEDIA post-notifications denied")
+                return@registerForActivityResult
+            }
+            launchShareAudio()
+        }
 
     private fun hostPermissions(): Array<String> =
         when (radio.transportMode) {
@@ -212,18 +267,25 @@ private class IntercomViewModel(
     }
 }
 
-@Suppress("LongParameterList")
+@Suppress("LongParameterList", "UnusedParameter")
 @Composable
 private fun HomeScreen(
     status: String,
     hosting: Boolean,
     guesting: Boolean,
+    linked: Boolean,
     stats: ConnectionStats?,
     transportMode: TransportMode,
+    mediaSharing: Boolean,
+    mediaPartnerSharing: Boolean,
+    mediaCaptureSupported: Boolean,
+    mediaCaptureSilent: Boolean,
     onHost: () -> Unit,
     onGuest: () -> Unit,
     onDiag: () -> Unit,
     onTransportChange: (TransportMode) -> Unit,
+    onShareAudio: () -> Unit,
+    onStopShareAudio: () -> Unit,
 ) {
     val sessionActive = hosting || guesting
     Box(modifier = Modifier.fillMaxSize()) {
@@ -252,6 +314,15 @@ private fun HomeScreen(
             }
             Spacer(Modifier.height(24.dp))
             Text(text = status, style = MaterialTheme.typography.bodySmall)
+            if (mediaCaptureSupported && linked) {
+                MediaShareControls(
+                    sharing = mediaSharing,
+                    partnerSharing = mediaPartnerSharing,
+                    captureSilent = mediaCaptureSilent,
+                    onShareAudio = onShareAudio,
+                    onStopShareAudio = onStopShareAudio,
+                )
+            }
             if (stats != null) {
                 Spacer(Modifier.height(16.dp))
                 StatsPanel(stats)
@@ -297,14 +368,9 @@ private fun TransportToggle(
     onChange: (TransportMode) -> Unit,
 ) {
     Row {
-        if (current == TransportMode.Bluetooth) {
-            Button(onClick = {}, enabled = enabled) { Text("Bluetooth") }
-        } else {
-            OutlinedButton(
-                onClick = { onChange(TransportMode.Bluetooth) },
-                enabled = enabled,
-            ) { Text("Bluetooth") }
-        }
+        // Bluetooth transport is deprecated (LE/SCO airtime can't carry the
+        // voice link reliably); grayed out, kept for later cleanup.
+        OutlinedButton(onClick = {}, enabled = false) { Text("Bluetooth (deprecated)") }
         Spacer(Modifier.width(12.dp))
         if (current == TransportMode.WifiDirect) {
             Button(onClick = {}, enabled = enabled) { Text("Wi-Fi Direct") }
@@ -314,5 +380,32 @@ private fun TransportToggle(
                 enabled = enabled,
             ) { Text("Wi-Fi Direct") }
         }
+    }
+}
+
+@Composable
+private fun MediaShareControls(
+    sharing: Boolean,
+    partnerSharing: Boolean,
+    captureSilent: Boolean,
+    onShareAudio: () -> Unit,
+    onStopShareAudio: () -> Unit,
+) {
+    Spacer(Modifier.height(16.dp))
+    if (sharing) {
+        Button(onClick = onStopShareAudio) { Text("Stop Sharing") }
+    } else {
+        Button(onClick = onShareAudio, enabled = !partnerSharing) { Text("Share Audio") }
+    }
+    if (partnerSharing) {
+        Spacer(Modifier.height(8.dp))
+        Text(text = "Partner is sharing audio", style = MaterialTheme.typography.bodySmall)
+    }
+    if (sharing && captureSilent) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "No audio detected — start playback (DRM apps can't be shared)",
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }

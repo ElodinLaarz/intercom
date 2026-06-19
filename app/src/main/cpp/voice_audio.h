@@ -39,6 +39,9 @@ class RxEngine {
   bool start();
   void stop();
   bool pushFrame(const std::uint8_t* data, std::size_t len);
+  // Peak |amplitude| of the most recently decoded playout frame (0..32767).
+  // Read lock-free by the shared-media ducking poll to detect partner speech.
+  int rxPeak() const;
 
   RxEngine(const RxEngine&) = delete;
   RxEngine& operator=(const RxEngine&) = delete;

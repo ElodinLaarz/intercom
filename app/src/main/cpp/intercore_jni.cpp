@@ -194,3 +194,17 @@ Java_com_elodin_intercom_NativeCore_stopHostPlayout(JNIEnv*, jobject) {
     LOGI("AUDIO playout stopped");
   }
 }
+
+// Peak |amplitude| of the partner's most recently decoded voice frame (0 when
+// no playout engine is live). The shared-media ducking poll reads this to lower
+// media volume while the partner is speaking — "voice ducks media".
+extern "C" JNIEXPORT jint JNICALL
+Java_com_elodin_intercom_NativeCore_voiceRxPeak(JNIEnv*, jobject) {
+  std::shared_ptr<intercore::audio::RxEngine> engine;
+  {
+    std::lock_guard<std::mutex> lock(g_audio_mutex);
+    engine = g_rx;
+  }
+  if (!engine) return 0;
+  return engine->rxPeak();
+}

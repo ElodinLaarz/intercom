@@ -27,4 +27,8 @@ target_include_directories(test_voice_frame PRIVATE ../proto tests)
 add_test(NAME ring_buffer COMMAND test_ring_buffer)
 add_test(NAME seq_filter COMMAND test_seq_filter)
 add_test(NAME adpcm COMMAND test_adpcm)
+add_executable(test_media_frame tests/test_media_frame.cpp)
+target_include_directories(test_media_frame PRIVATE ../proto tests)
+
 add_test(NAME voice_frame COMMAND test_voice_frame)
+add_test(NAME media_frame COMMAND test_media_frame)

@@ -27,4 +27,11 @@ object NativeCore {
     external fun pushHostFrame(frame: ByteArray): Boolean
 
     external fun stopHostPlayout()
+
+    /**
+     * Peak |amplitude| (0..32767) of the partner's most recently decoded voice
+     * frame, or 0 when no voice playout is live. Polled by the shared-media
+     * ducking loop to detect partner speech.
+     */
+    external fun voiceRxPeak(): Int
 }

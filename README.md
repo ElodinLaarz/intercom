@@ -1,8 +1,15 @@
 # Intercom
 
-A private 1:1 push-to-talk intercom between two Android phones over Bluetooth LE
-or Wi-Fi Direct. Pure native: Kotlin + Jetpack Compose + C++ (Oboe + ADPCM).
-Distributed by sideload (Obtainium) from Forgejo releases. Android 12+ (minSdk 31).
+A private 1:1 push-to-talk intercom between two Android phones over Wi-Fi Direct,
+with optional **shared listening** — stream one phone's media (e.g. a podcast in
+AntennaPod) to the other so you hear it together, with voice ducking the media.
+Pure native: Kotlin + Jetpack Compose + C++ (Oboe + ADPCM). Distributed by
+sideload (Obtainium) from Forgejo releases. Android 12+ (minSdk 31).
+
+> Shared audio uses Android's playback capture, which apps can opt out of:
+> open media apps (AntennaPod, etc.) work; most DRM streaming apps (e.g. YouTube
+> Music) block capture and will share silence. The Bluetooth LE transport is
+> deprecated; Wi-Fi Direct is the supported path.
 
 ## Install (Obtainium)
 
@@ -27,6 +34,7 @@ only lessons.
 | [POSTMORTEM.md](POSTMORTEM.md) | Why v1 was retired and what this repo must not repeat. |
 | [STATUS.md](STATUS.md) | Per-subsystem, last-validated-on-device dates. The only status that counts. |
 | [M1_PLAN.md](M1_PLAN.md) | Current milestone (M1 — tracer bullet) design + ordered todo. Start here when picking up M1. |
+| [SHARED_AUDIO.md](SHARED_AUDIO.md) | M6 shared-audio design: AAC-LC over Wi-Fi Direct, voice ducking, known limits. |
 
 ## Build
 

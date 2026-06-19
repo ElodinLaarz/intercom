@@ -21,7 +21,7 @@
 
 namespace intercore::proto {
 
-inline constexpr int kProtocolVersion = 2;       // bump on ANY wire-format change
+inline constexpr int kProtocolVersion = 3;       // bump on ANY wire-format change
 inline constexpr int kMsdCompanyId = 0xFFFF;     // BLE manufacturer id (landmine #2)
 inline constexpr int kMsdPattern0 = 0x01;        // MSD scan-filter pattern, byte 0
 inline constexpr int kMsdPattern1 = 0x01;        // MSD scan-filter pattern, byte 1
@@ -55,5 +55,28 @@ inline constexpr int kVoiceOffPredSample = 8;
 inline constexpr int kVoiceOffStepIndex  = 10;
 inline constexpr int kVoiceOffReserved   = 11;
 inline constexpr int kVoiceOffAdpcm      = 12;
+
+// ---- Shared-media path (coded audio over Wi-Fi Direct only) ----------------
+// SEPARATE media path; never reuse any kVoice* constant. Decimal-only values.
+// Codec-neutral by design: the wire frame carries an opaque coded-audio payload
+// (the app encodes AAC-LC via Android MediaCodec, 2026-06-19); the wire layout
+// does not depend on the codec. `len` is variable; payloads are bounds-checked
+// against kMediaPayloadMaxBytes.
+inline constexpr int kMediaSampleRateHz     = 48000;
+inline constexpr int kMediaChannelsMax      = 2;
+inline constexpr int kMediaFrameMs          = 20;
+// AAC-LC stereo access units average ~341 B at 128 kbps but the bit reservoir
+// lets individual frames burst toward the AAC-LC ceiling (768 B/channel); 1536
+// guarantees no in-spec frame is dropped. The u16 len field supports it.
+inline constexpr int kMediaPayloadMaxBytes  = 1536;
+inline constexpr int kMediaStreamPort       = 9754;
+// media frame wire offsets (little-endian; parallel to kVoiceOff*):
+inline constexpr int kMediaOffEpoch    = 0;
+inline constexpr int kMediaOffSeq      = 4;
+inline constexpr int kMediaOffFlags    = 8;
+inline constexpr int kMediaOffReserved = 9;
+inline constexpr int kMediaOffLen      = 10;
+inline constexpr int kMediaOffPayload  = 12;
+inline constexpr int kMediaHeaderBytes = 12;
 
 }  // namespace intercore::proto
