@@ -4,7 +4,7 @@ A private 1:1 push-to-talk intercom between two Android phones over Wi-Fi Direct
 with optional **shared listening** — stream one phone's media (e.g. a podcast in
 AntennaPod) to the other so you hear it together, with voice ducking the media.
 Pure native: Kotlin + Jetpack Compose + C++ (Oboe + ADPCM). Distributed by
-sideload (Obtainium) from Forgejo releases. Android 12+ (minSdk 31).
+sideload (Obtainium) from GitHub releases. Android 12+ (minSdk 31).
 
 > Shared audio uses Android's playback capture, which apps can opt out of:
 > open media apps (AntennaPod, etc.) work; most DRM streaming apps (e.g. YouTube
@@ -13,17 +13,12 @@ sideload (Obtainium) from Forgejo releases. Android 12+ (minSdk 31).
 
 ## Install (Obtainium)
 
-**GitHub (public, recommended)** — tap on the phone, or add `https://github.com/ElodinLaarz/intercom` in Obtainium → **Add App** (GitHub source, auto-detected):
+Tap on the phone, or add `https://github.com/ElodinLaarz/intercom` in Obtainium → **Add App** (GitHub source, auto-detected):
 
 [![Add via GitHub](https://img.shields.io/badge/Obtainium-Add%20via%20GitHub-24292e?style=for-the-badge&logo=github&logoColor=white)](https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fadd%2Fhttps%3A%2F%2Fgithub.com%2FElodinLaarz%2Fintercom)
 
-**Forgejo (tailnet-only, no token)** — URL `http://100.95.212.39:3000/laarz/intercom` (MagicDNS alt `http://laarz-desk-1:3000/laarz/intercom`) → source **Forgejo**:
-
-[![Add via Forgejo](https://img.shields.io/badge/Obtainium-Add%20via%20Forgejo-1e88e5?style=for-the-badge&logo=android&logoColor=white)](https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fadd%2Fhttp%3A%2F%2F100.95.212.39%3A3000%2Flaarz%2Fintercom)
-
 Obtainium tracks the latest release; new versions appear on refresh. Manual sideload:
-[GitHub Releases](https://github.com/ElodinLaarz/intercom/releases) ·
-[Forgejo Releases](http://100.95.212.39:3000/laarz/intercom/releases).
+[GitHub Releases](https://github.com/ElodinLaarz/intercom/releases).
 
 This is the greenfield v2 restart of `walkie-talkie`. No v1 code was carried over —
 only lessons.

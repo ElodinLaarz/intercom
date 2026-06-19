@@ -7,8 +7,8 @@
 #   tools/smoke [adb-serial ...]
 #
 # With no serials, every 'device'-state entry from `adb devices` is used. The
-# phones reach this host over Tailscale adb (pixel 100.97.27.15, moto
-# 100.69.181.85 — see README). Exits non-zero if any phone fails the asserts.
+# phones reach this host over Tailscale adb (pair them via wireless debugging).
+# Exits non-zero if any phone fails the asserts.
 #
 # Env knobs: SMOKE_WAIT (seconds to wait after launch, default 3).
 set -u
