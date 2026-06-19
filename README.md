@@ -6,16 +6,17 @@ Distributed by sideload (Obtainium) from Forgejo releases. Android 12+ (minSdk 3
 
 ## Install (Obtainium)
 
-[![Add to Obtainium](https://img.shields.io/badge/Obtainium-Add%20Intercom-1e88e5?style=for-the-badge&logo=android&logoColor=white)](https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fadd%2Fhttp%3A%2F%2F100.95.212.39%3A3000%2Flaarz%2Fintercom)
+**GitHub (public, recommended)** — tap on the phone, or add `https://github.com/ElodinLaarz/intercom` in Obtainium → **Add App** (GitHub source, auto-detected):
 
-Reachable over Tailscale only (tailnet-private, no token for read). Tap the badge
-on the phone to add this repo as an Obtainium source, or add it manually:
+[![Add via GitHub](https://img.shields.io/badge/Obtainium-Add%20via%20GitHub-24292e?style=for-the-badge&logo=github&logoColor=white)](https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fadd%2Fhttps%3A%2F%2Fgithub.com%2FElodinLaarz%2Fintercom)
 
-1. Obtainium → **Add App** → URL `http://100.95.212.39:3000/laarz/intercom`
-   (MagicDNS alt: `http://laarz-desk-1:3000/laarz/intercom`) → source **Forgejo**.
-2. Obtainium tracks the latest release; new versions appear on refresh.
+**Forgejo (tailnet-only, no token)** — URL `http://100.95.212.39:3000/laarz/intercom` (MagicDNS alt `http://laarz-desk-1:3000/laarz/intercom`) → source **Forgejo**:
 
-Manual sideload fallback: [Releases](http://100.95.212.39:3000/laarz/intercom/releases).
+[![Add via Forgejo](https://img.shields.io/badge/Obtainium-Add%20via%20Forgejo-1e88e5?style=for-the-badge&logo=android&logoColor=white)](https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fadd%2Fhttp%3A%2F%2F100.95.212.39%3A3000%2Flaarz%2Fintercom)
+
+Obtainium tracks the latest release; new versions appear on refresh. Manual sideload:
+[GitHub Releases](https://github.com/ElodinLaarz/intercom/releases) ·
+[Forgejo Releases](http://100.95.212.39:3000/laarz/intercom/releases).
 
 This is the greenfield v2 restart of `walkie-talkie`. No v1 code was carried over —
 only lessons.
